@@ -5,18 +5,13 @@
  * @date 2026/4/22 V1.2
  * @date 2026/4/30 V1.8
  * @version 1.8
- * @note 判断滤波器类型，需要根据项目实际情况进行调整堆大小，以避免Stack Overflow，此函数暂未用到堆，如需
+ * @note 判断滤波器类型，需要根据项目实际情况进行调整Stack大小，以避免Stack Overflow，此函数暂未用到堆，如需
  *       精确的阈值判断，必须使用arm c library，不可使用任何microlib，若不在意速度以及阈值精度，推荐打开
  *       microlib。
  ******************************************************************************/
 
-// #include "includes.h"
-
 #include "filter_check.h"
-// #include "arm_math.h"
 #include "math.h"
-#include <stdint.h>
-#include <stdlib.h>
 
 #define assertFILTER_CHECK(x)   \
     do                          \
@@ -57,9 +52,9 @@ static float read_f32(void *p) { return *(float *)p; }
  * @param ADC_Ref ADC参考电压，默认为3.3V
  * @return FILTER_INFO 滤波器信息结构体
  */
-#ifdef FILTER_CHECK_INFO
 FILTER_INFO filter_check(uint32_t addr, uint8_t Msize, uint16_t Length, float threshold, uint8_t BitWidth, float ADC_Ref)
 {
+#ifdef USE_FILTER_CHECK
     FILTER_INFO filter_info = {0, 0, FILTER_NULL};
 
     assertFILTER_CHECK(addr != 0);
@@ -72,7 +67,7 @@ FILTER_INFO filter_check(uint32_t addr, uint8_t Msize, uint16_t Length, float th
     if (ADC_Ref == 0)
         ADC_Ref = 3.3f;
 
-    float vFFTDATAThreshold = expf(threshold * 0.11512925464970229f) * 1.4142135623730950488016f / (ADC_Ref / (1 << BitWidth));
+    float vFFTDATAThreshold = expf(threshold * 0.11512925464970f) * 1.41421356237309f / (ADC_Ref / (1 << BitWidth));
 
     uint8_t _addr_Inc = Msize / 8, find = 0;
 
@@ -214,5 +209,5 @@ FILTER_INFO filter_check(uint32_t addr, uint8_t Msize, uint16_t Length, float th
     }
 
     return filter_info;
-}
 #endif
+}

@@ -1,9 +1,9 @@
 #ifndef FILTER_CHECK_H
 #define FILTER_CHECK_H
 
-#include "main.h"
+#include <stdint.h>
 
-#ifdef FILTER_CHECK_INFO
+#ifdef USE_FILTER_CHECK
 typedef enum
 {
     FILTER_NULL = 0,
