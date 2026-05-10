@@ -1,5 +1,5 @@
 /******************************************************************************
- * @file filter_check.chis file contains the implementation of the filter_check function, which is used to determine the type of filter based on the provided parameters.
+ * @file filter_check.c
  * @author Analog
  * @date 2026/4/19 V1.0
  * @date 2026/4/22 V1.2
