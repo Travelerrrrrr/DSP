@@ -67,7 +67,7 @@ FILTER_INFO filter_check(uint32_t addr, uint8_t Msize, uint16_t Length, float th
     if (ADC_Ref == 0)
         ADC_Ref = 3.3f;
 
-    float vFFTDATAThreshold = expf(threshold * 0.11512925464970f) * 1.41421356237309f / (ADC_Ref / (1 << BitWidth));
+    float vFFTDATAThreshold = expf(threshold * 0.11512925464970f) * 1.41421356237309f / (ADC_Ref / ((1 << BitWidth) - 1);
 
     uint8_t _addr_Inc = Msize / 8, find = 0;
 
