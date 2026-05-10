@@ -34,7 +34,7 @@ typedef enum
 
 typedef enum
 {
-	RFFT_UNIT_RAW = 0,
+	RFFT_UNIT_RAW = 0, // ADC原始数据
 	RFFT_UNIT_DBV,
 	RFFT_UNIT_DBFS
 } rfft_unit_t;

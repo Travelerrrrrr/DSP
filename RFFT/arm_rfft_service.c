@@ -2,7 +2,7 @@
  * @file arm_rfft_service.c
  * @brief 基于 CMSIS-DSP 的实数 FFT 服务层实现。
  * @author Analog
- * @version 1.0
+ * @version 1.2
  * @date 2026-05-10
  * @note 本文件负责完成 ADC 原始数据搬运、数值格式转换、窗函数处理、
  *       RFFT 计算，以及单边幅频/相频结果提取。
@@ -211,7 +211,7 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
  */
 static arm_status rfft_copy_input(rfft_handle_t *hrfft, uint32_t adc_data_addr)
 {
-	uint32_t size = FFT_LENGTH * sizeof(uint32_t);
+	uint16_t size = FFT_LENGTH * sizeof(uint32_t);
 
 	if (hrfft->dma.transfer != NULL)
 	{
