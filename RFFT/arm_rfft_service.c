@@ -223,6 +223,7 @@ static arm_status rfft_copy_input(rfft_handle_t *hrfft, uint32_t adc_data_addr)
 	}
 
 	memcpy(hrfft->work_buffer, (const void *)(uintptr_t)adc_data_addr, size);
+
 	return ARM_MATH_SUCCESS;
 }
 
