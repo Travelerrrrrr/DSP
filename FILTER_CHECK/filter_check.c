@@ -1,10 +1,8 @@
 /******************************************************************************
  * @file filter_check.c
  * @author Analog
- * @date 2026/4/19 V1.0
- * @date 2026/4/22 V1.2
- * @date 2026/4/30 V1.8
- * @version 1.8
+ * @date 2026/5/11
+ * @version 2.0
  * @note 判断滤波器类型，需要根据项目实际情况进行调整Stack大小，以避免Stack Overflow，此函数暂未用到堆，如需
  *       精确的阈值判断，必须使用arm c library，不可使用任何microlib，若不在意速度以及阈值精度，推荐打开
  *       microlib。
@@ -12,6 +10,9 @@
 
 #include "filter_check.h"
 #include "math.h"
+
+#define FILTER_EXPF_CONVERSION_FACTOR 0.11512925464970f // ln(10) / 20
+#define FILTER_SQRT2 1.41421356237309f
 
 #define assertFILTER_CHECK(x)   \
     do                          \
@@ -75,10 +76,10 @@ FILTER_INFO filter_check(uint32_t addr, uint8_t Msize, uint16_t Length, FILTER_U
         vFFTDATAThreshold = threashold;
         break;
     case RFFT_UNIT_DBV:
-        vFFTDATAThreshold = expf(threshold * 0.11512925464970f) * 1.41421356237309f / (ADC_Ref / ((1 << BitWidth) - 1));
+        vFFTDATAThreshold = expf(threshold * FILTER_EXPF_CONVERSION_FACTOR) * FILTER_SQRT2 / (ADC_Ref / ((1 << BitWidth) - 1));
         break;
     case RFFT_UNIT_DBFS:
-        vFFTDATAThreshold = expf(threshold * 0.11512925464970f) * ((1 << BitWidth) - 1); // dBFS = 20 * log10(x / ((1<<BitWidth) - 1))
+        vFFTDATAThreshold = expf(threshold * FILTER_EXPF_CONVERSION_FACTOR) * ((1 << BitWidth) - 1); // dBFS = 20 * log10(x / ((1<<BitWidth) - 1))
         break;
     default:
         vFFTDATAThreshold = threashold;
