@@ -7,7 +7,7 @@
 #if USE_ARM_FFT
 
 #ifndef FFT_LENGTH
-#define FFT_LENGTH 2048U
+#define FFT_LENGTH 1024U
 #endif
 
 #define RFFT_RESULT_LENGTH (FFT_LENGTH / 2U)
@@ -34,7 +34,7 @@ typedef enum
 
 typedef enum
 {
-	RFFT_UNIT_RAW = 0, // ADC原始数据
+	RFFT_UNIT_RAW = 0,
 	RFFT_UNIT_DBV,
 	RFFT_UNIT_DBFS
 } rfft_unit_t;
@@ -64,6 +64,11 @@ typedef struct
 
 arm_status rfft_handle_init(rfft_handle_t *hrfft, const rfft_dma_t *dma);
 
+void rfft_start(rfft_handle_t *hrfft,
+				uint32_t adc_data_addr,
+				float32_t *result_data,
+				rfft_window_t window);
+
 void rfft_start_af(rfft_handle_t *hrfft,
 				   uint32_t adc_data_addr,
 				   float32_t *result_data,
@@ -73,13 +78,23 @@ void rfft_start_af(rfft_handle_t *hrfft,
 void rfft_start_pf(rfft_handle_t *hrfft,
 				   uint32_t adc_data_addr,
 				   float32_t *result_data,
-				   rfft_window_t window);
+				   rfft_window_t window,
+				   uint8_t p_unit);
 
 void rfft_start_af_pf(rfft_handle_t *hrfft,
 					  uint32_t adc_data_addr,
 					  float32_t *result_data,
 					  rfft_window_t window,
-					  rfft_unit_t unit);
+					  rfft_unit_t unit,
+					  uint8_t p_unit);
+
+void irfft_start(rfft_handle_t *hrfft,
+				 const float32_t *rfft_af,
+				 const float32_t *rfft_pf,
+				 float32_t *irfft,
+				 const float32_t *bode,
+				 const float32_t *PF,
+				 uint8_t p_unit);
 
 void RFFT_ERROR_HANDLER(void);
 
