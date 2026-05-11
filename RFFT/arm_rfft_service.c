@@ -2,8 +2,8 @@
  * @file arm_rfft_service.c
  * @brief 基于 CMSIS-DSP 的实数 FFT 服务层实现。
  * @author Analog
- * @version 1.2
- * @date 2026-05-10
+ * @version 1.4
+ * @date 2026-05-11
  * @note 本文件负责完成 ADC 原始数据搬运、数值格式转换、窗函数处理、
  *       RFFT 计算，以及单边幅频/相频结果提取。
  */
@@ -130,7 +130,8 @@ static void rfft_make_single_sided_amplitude(rfft_handle_t *hrfft, float32_t *re
 	arm_abs_f32(&hrfft->work_buffer[0], &result_data[0], 1U);
 	arm_cmplx_mag_f32(&hrfft->work_buffer[2], &result_data[1], RFFT_RESULT_LENGTH - 1U);
 	arm_scale_f32(result_data, scale, result_data, RFFT_RESULT_LENGTH);
-	arm_scale_f32(&result_data[0], 0.5f, &result_data[0], 1U);
+	// arm_scale_f32(&result_data[0], 0.5f, &result_data[0], 1U);
+	result_data[0] *= 0.5f;
 }
 
 /**
@@ -152,15 +153,10 @@ static void rfft_make_single_sided_phase(rfft_handle_t *hrfft, float32_t *result
 		real = hrfft->work_buffer[2U * i];
 		imag = hrfft->work_buffer[(2U * i) + 1U];
 
-		if (arm_atan2_f32(imag, real, &result_data[i]) != ARM_MATH_SUCCESS)
-		{
-			result_data[i] = 0.0f;
-		}
-		else
-		{
-			result_data[i] *= RFFT_RAD_TO_DEG;
-		}
+		arm_atan2_f32(imag, real, &result_data[i]);
 	}
+
+	arm_scale_f32(&result_data[1], RFFT_RAD_TO_DEG, &result_data[1], RFFT_RESULT_LENGTH - 1U);
 }
 
 /**
@@ -188,18 +184,22 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
 
 		arm_sqrt_f32((real * real) + (imag * imag), &result_data[i]);
 
-		if (arm_atan2_f32(imag, real, &result_data[RFFT_RESULT_LENGTH + i]) != ARM_MATH_SUCCESS)
-		{
-			result_data[RFFT_RESULT_LENGTH + i] = 0.0f;
-		}
-		else
-		{
-			result_data[RFFT_RESULT_LENGTH + i] *= RFFT_RAD_TO_DEG;
-		}
+		// if (arm_atan2_f32(imag, real, &result_data[RFFT_RESULT_LENGTH + i]) != ARM_MATH_SUCCESS)
+		// {
+		// 	result_data[RFFT_RESULT_LENGTH + i] = 0.0f;
+		// }
+		// else
+		// {
+		// 	result_data[RFFT_RESULT_LENGTH + i] *= RFFT_RAD_TO_DEG;
+		// }
+
+		arm_atan2_f32(imag, real, &result_data[RFFT_RESULT_LENGTH + i]);
 	}
 
+	arm_scale_f32(&result_data[RFFT_RESULT_LENGTH + 1], RFFT_RAD_TO_DEG, &result_data[RFFT_RESULT_LENGTH + 1], RFFT_RESULT_LENGTH - 1U);
 	arm_scale_f32(result_data, scale, result_data, RFFT_RESULT_LENGTH);
-	arm_scale_f32(&result_data[0], 0.5f, &result_data[0], 1U);
+	// arm_scale_f32(&result_data[0], 0.5f, &result_data[0], 1U);
+	result_data[0] *= 0.5f;
 }
 
 /**
@@ -211,7 +211,7 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
  */
 static arm_status rfft_copy_input(rfft_handle_t *hrfft, uint32_t adc_data_addr)
 {
-	uint16_t size = FFT_LENGTH * sizeof(uint32_t);
+	uint32_t size = FFT_LENGTH * sizeof(uint32_t);
 
 	if (hrfft->dma.transfer != NULL)
 	{
