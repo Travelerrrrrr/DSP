@@ -2,7 +2,7 @@
  * @file arm_rfft_service.c
  * @brief 基于 CMSIS-DSP 的实数 FFT 服务层实现。
  * @author Analog
- * @version 1.4
+ * @version 1.5
  * @date 2026-05-11
  * @note 本文件负责完成 ADC 原始数据搬运、数值格式转换、窗函数处理、
  *       RFFT 计算，以及单边幅频/相频结果提取。
@@ -19,10 +19,10 @@
 #define RFFT_RAD_TO_DEG 57.29577951308232f
 
 /**
- * @brief 将 work buffer 中的 unsigned 32-bit 数据原地转换为 float32 数据。
- * @param Src 指向工作缓冲区，转换前按 uint32_t 解释，转换后按 float32_t 解释。
- * @param length 需要转换的数据点数。
- * @note 该函数要求源数据和目标数据都是 32 bit 宽度，因此可以正序原地转换。
+ * @brief 将工作缓冲区中的 unsigned 32-bit 原始采样原地转换为 float32 数据。
+ * @param[in,out] Src 工作缓冲区指针；转换前按 uint32_t 解释，转换后按 float32_t 解释。
+ * @param[in] length 需要转换的数据点数。
+ * @note 源数据和目标数据均为 32 bit 宽度，因此可以安全地正序原地转换。
  */
 static void convert_unsigned_to_float(float32_t *Src, uint32_t length)
 {
@@ -35,10 +35,10 @@ static void convert_unsigned_to_float(float32_t *Src, uint32_t length)
 }
 
 /**
- * @brief 生成并缓存 RFFT 窗函数。
- * @param hrfft RFFT 句柄。
- * @param window 需要使用的窗函数类型。
- * @note 若当前缓存的窗函数类型未变化，则直接复用已有 window_buffer。
+ * @brief 生成并缓存 RFFT 窗函数及其幅值校正增益。
+ * @param[in,out] hrfft RFFT 句柄。
+ * @param[in] window 需要使用的窗函数类型。
+ * @note 若当前缓存的窗函数类型未变化，则直接复用已有 window_buffer 和 window_gain。
  */
 static void rfft_generate_window(rfft_handle_t *hrfft, rfft_window_t window)
 {
@@ -87,10 +87,10 @@ static void rfft_generate_window(rfft_handle_t *hrfft, rfft_window_t window)
 }
 
 /**
- * @brief 将幅值结果转换为指定单位。
- * @param result_data 幅频结果数组，长度至少为 RFFT_RESULT_LENGTH。
- * @param unit 目标单位，可选择 RAW、dBV 或 dBFS。
- * @note RAW 模式不做转换；dB 模式下执行 20log10(x/reference)。
+ * @brief 将单边幅频结果转换为指定单位。
+ * @param[in,out] result_data 幅频结果数组，长度至少为 RFFT_RESULT_LENGTH。
+ * @param[in] unit 目标单位，可选择 RAW、dBV 或 dBFS。
+ * @note RAW 模式不做转换；dB 模式下执行 20log10(x/reference)，并对输入下限做裁剪以避免 log(0)。
  */
 static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
 {
@@ -118,10 +118,10 @@ static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
 }
 
 /**
- * @brief 从 RFFT 复数结果中提取单边幅频结果。
- * @param hrfft RFFT 句柄。
- * @param result_data 输出幅频结果，长度至少为 RFFT_RESULT_LENGTH。
- * @note 输出结果会根据 FFT 长度和窗函数增益进行幅值归一化。
+ * @brief 从 RFFT 复数结果中提取并归一化单边幅频结果。
+ * @param[in] hrfft RFFT 句柄。
+ * @param[out] result_data 输出幅频结果，长度至少为 RFFT_RESULT_LENGTH。
+ * @note 非直流频点按单边谱幅值缩放，直流分量额外乘以 0.5 以避免被双边合并系数放大。
  */
 static void rfft_make_single_sided_amplitude(rfft_handle_t *hrfft, float32_t *result_data)
 {
@@ -136,78 +136,96 @@ static void rfft_make_single_sided_amplitude(rfft_handle_t *hrfft, float32_t *re
 
 /**
  * @brief 从 RFFT 复数结果中提取单边相频结果。
- * @param hrfft RFFT 句柄。
- * @param result_data 输出相频结果，长度至少为 RFFT_RESULT_LENGTH。
- * @note 输出相位单位为角度，范围由 arm_atan2_f32 的输出决定，直流相位固定为 0。
+ * @param[in] hrfft RFFT 句柄。
+ * @param[out] result_data 输出相频结果，长度至少为 RFFT_RESULT_LENGTH。
+ * @param[in] unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
+ * @note 直流相位固定为 0，其余频点由 arm_atan2_f32 计算。
  */
-static void rfft_make_single_sided_phase(rfft_handle_t *hrfft, float32_t *result_data)
+static void rfft_make_single_sided_phase(rfft_handle_t *hrfft, float32_t *result_data, uint8_t unit)
 {
 	uint32_t i;
-	float32_t real;
-	float32_t imag;
+	const float32_t *p = &hrfft->work_buffer[2];
 
 	result_data[0] = 0.0f;
 
-	for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
+	if (unit)
 	{
-		real = hrfft->work_buffer[2U * i];
-		imag = hrfft->work_buffer[(2U * i) + 1U];
-
-		arm_atan2_f32(imag, real, &result_data[i]);
+		// 弧度->角度缩放融入循环，省一次 arm_scale_f32 的 O(N) 遍历
+		float32_t phase;
+		for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
+		{
+			arm_atan2_f32(p[1], p[0], &phase);
+			result_data[i] = phase * RFFT_RAD_TO_DEG;
+			p += 2;
+		}
 	}
-
-	arm_scale_f32(&result_data[1], RFFT_RAD_TO_DEG, &result_data[1], RFFT_RESULT_LENGTH - 1U);
+	else
+	{
+		for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
+		{
+			arm_atan2_f32(p[1], p[0], &result_data[i]);
+			p += 2;
+		}
+	}
 }
 
 /**
  * @brief 同时从 RFFT 复数结果中提取单边幅频和相频结果。
- * @param hrfft RFFT 句柄。
- * @param result_data 输出数组，长度至少为 2 * RFFT_RESULT_LENGTH。
- * @note result_data 前半段保存幅值，后半段保存角度制相位。
+ * @param[in] hrfft RFFT 句柄。
+ * @param[out] result_data 输出数组，长度至少为 2 * RFFT_RESULT_LENGTH。
+ * @param[in] unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
+ * @note result_data 前半段保存归一化幅值，后半段保存相位；直流相位固定为 0。
  */
-static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32_t *result_data)
+static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32_t *result_data, uint8_t unit)
 {
 	uint32_t i;
-	float32_t real;
-	float32_t imag;
-
-	float32_t scale = 2.0f / ((float32_t)FFT_LENGTH * hrfft->window_gain);
+	const float32_t *p = &hrfft->work_buffer[2];
+	const float32_t scale = 2.0f / ((float32_t)FFT_LENGTH * hrfft->window_gain);
+	float32_t mag;
+	float32_t phase;
 
 	result_data[RFFT_RESULT_LENGTH] = 0.0f;
 
+	// DC 幅值：单边谱 DC 不翻倍，scale*0.5 一次性应用
 	arm_abs_f32(&hrfft->work_buffer[0], &result_data[0], 1U);
+	result_data[0] *= scale * 0.5f;
 
-	for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
+	if (unit)
 	{
-		real = hrfft->work_buffer[2U * i];
-		imag = hrfft->work_buffer[(2U * i) + 1U];
+		// 幅值缩放与弧度->角度缩放都融入循环，省两次 arm_scale_f32 的 O(N) 遍历
+		for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
+		{
+			float32_t real = *p++;
+			float32_t imag = *p++;
 
-		arm_sqrt_f32((real * real) + (imag * imag), &result_data[i]);
+			arm_sqrt_f32((real * real) + (imag * imag), &mag);
+			result_data[i] = mag * scale;
 
-		// if (arm_atan2_f32(imag, real, &result_data[RFFT_RESULT_LENGTH + i]) != ARM_MATH_SUCCESS)
-		// {
-		// 	result_data[RFFT_RESULT_LENGTH + i] = 0.0f;
-		// }
-		// else
-		// {
-		// 	result_data[RFFT_RESULT_LENGTH + i] *= RFFT_RAD_TO_DEG;
-		// }
-
-		arm_atan2_f32(imag, real, &result_data[RFFT_RESULT_LENGTH + i]);
+			arm_atan2_f32(imag, real, &phase);
+			result_data[RFFT_RESULT_LENGTH + i] = phase * RFFT_RAD_TO_DEG;
+		}
 	}
+	else
+	{
+		for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
+		{
+			float32_t real = *p++;
+			float32_t imag = *p++;
 
-	arm_scale_f32(&result_data[RFFT_RESULT_LENGTH + 1], RFFT_RAD_TO_DEG, &result_data[RFFT_RESULT_LENGTH + 1], RFFT_RESULT_LENGTH - 1U);
-	arm_scale_f32(result_data, scale, result_data, RFFT_RESULT_LENGTH);
-	// arm_scale_f32(&result_data[0], 0.5f, &result_data[0], 1U);
-	result_data[0] *= 0.5f;
+			arm_sqrt_f32((real * real) + (imag * imag), &mag);
+			result_data[i] = mag * scale;
+
+			arm_atan2_f32(imag, real, &result_data[RFFT_RESULT_LENGTH + i]);
+		}
+	}
 }
 
 /**
  * @brief 将输入采样数据复制到 RFFT 工作缓冲区。
- * @param hrfft RFFT 句柄。
- * @param adc_data_addr 输入采样缓冲区地址。
- * @return ARM_MATH_SUCCESS 表示复制成功，其他值表示 DMA 或参数错误。
- * @note 当前输入按 uint32_t 采样数据处理；若配置了 DMA，则优先使用 DMA 搬运。
+ * @param[in,out] hrfft RFFT 句柄。
+ * @param[in] adc_data_addr 输入采样缓冲区地址。
+ * @return ARM_MATH_SUCCESS 表示复制成功，其他返回值表示 DMA 搬运失败。
+ * @note 当前输入按 uint32_t 采样数据处理；若配置了 DMA 适配器，则优先使用 DMA 搬运。
  */
 static arm_status rfft_copy_input(rfft_handle_t *hrfft, uint32_t adc_data_addr)
 {
@@ -228,12 +246,12 @@ static arm_status rfft_copy_input(rfft_handle_t *hrfft, uint32_t adc_data_addr)
 }
 
 /**
- * @brief 准备并执行 RFFT 变换。
- * @param hrfft RFFT 句柄。
- * @param adc_data_addr 输入采样缓冲区地址。
- * @param window 窗函数类型。
- * @return ARM_MATH_SUCCESS 表示 RFFT 前处理和计算成功。
- * @note 处理流程为：复制输入、unsigned 转 float、加窗、执行 arm_rfft_fast_f32。
+ * @brief 准备输入数据并执行 RFFT 变换。
+ * @param[in,out] hrfft RFFT 句柄。
+ * @param[in] adc_data_addr 输入采样缓冲区地址。
+ * @param[in] window 窗函数类型。
+ * @return ARM_MATH_SUCCESS 表示 RFFT 前处理和计算成功，其他返回值来自输入搬运过程。
+ * @note 处理流程为：复制输入、unsigned 转 float、生成并应用窗函数、执行 arm_rfft_fast_f32。
  */
 static arm_status rfft_prepare_transform(rfft_handle_t *hrfft, uint32_t adc_data_addr, rfft_window_t window)
 {
@@ -243,6 +261,7 @@ static arm_status rfft_prepare_transform(rfft_handle_t *hrfft, uint32_t adc_data
 	{
 		return status;
 	}
+
 	convert_unsigned_to_float(hrfft->work_buffer, FFT_LENGTH);
 	rfft_generate_window(hrfft, window);
 	arm_mult_f32(hrfft->work_buffer, hrfft->window_buffer, hrfft->work_buffer, FFT_LENGTH);
@@ -253,10 +272,10 @@ static arm_status rfft_prepare_transform(rfft_handle_t *hrfft, uint32_t adc_data
 
 /**
  * @brief 初始化 RFFT 句柄。
- * @param hrfft RFFT 句柄。
- * @param dma DMA 适配器指针；传入 NULL 时使用 memcpy 复制输入。
- * @return ARM_MATH_SUCCESS 表示初始化成功。
- * @note 该函数会根据 FFT_LENGTH 选择对应长度的 CMSIS-DSP RFFT 初始化函数。
+ * @param[out] hrfft RFFT 句柄。
+ * @param[in] dma DMA 适配器指针；传入 NULL 时使用 memcpy 复制输入。
+ * @return ARM_MATH_SUCCESS 表示初始化成功，ARM_MATH_ARGUMENT_ERROR 表示参数或 FFT_LENGTH 不支持。
+ * @note 该函数会重置 DMA 配置和窗函数缓存，并根据 FFT_LENGTH 选择对应长度的 CMSIS-DSP RFFT 初始化函数。
  */
 arm_status rfft_handle_init(rfft_handle_t *hrfft, const rfft_dma_t *dma)
 {
@@ -297,12 +316,13 @@ arm_status rfft_handle_init(rfft_handle_t *hrfft, const rfft_dma_t *dma)
 }
 
 /**
- * @brief 启动幅频计算。
- * @param hrfft RFFT 句柄。
- * @param adc_data_addr 输入采样缓冲区地址。
- * @param result_data 输出幅频结果，长度至少为 RFFT_RESULT_LENGTH。
- * @param window 窗函数类型。
- * @param unit 幅值输出单位。
+ * @brief 启动单边幅频计算。
+ * @param[in,out] hrfft RFFT 句柄。
+ * @param[in] adc_data_addr 输入采样缓冲区地址。
+ * @param[out] result_data 输出幅频结果，长度至少为 RFFT_RESULT_LENGTH。
+ * @param[in] window 窗函数类型。
+ * @param[in] unit 幅值输出单位。
+ * @note 参数非法或 RFFT 前处理失败时调用 RFFT_ERROR_HANDLER。
  */
 void rfft_start_af(rfft_handle_t *hrfft,
 				   uint32_t adc_data_addr,
@@ -329,16 +349,19 @@ void rfft_start_af(rfft_handle_t *hrfft,
 }
 
 /**
- * @brief 启动相频计算。
- * @param hrfft RFFT 句柄。
- * @param adc_data_addr 输入采样缓冲区地址。
- * @param result_data 输出相频结果，长度至少为 RFFT_RESULT_LENGTH。
- * @param window 窗函数类型。
+ * @brief 启动单边相频计算。
+ * @param[in,out] hrfft RFFT 句柄。
+ * @param[in] adc_data_addr 输入采样缓冲区地址。
+ * @param[out] result_data 输出相频结果，长度至少为 RFFT_RESULT_LENGTH。
+ * @param[in] window 窗函数类型。
+ * @param[in] p_unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
+ * @note 参数非法或 RFFT 前处理失败时调用 RFFT_ERROR_HANDLER。
  */
 void rfft_start_pf(rfft_handle_t *hrfft,
 				   uint32_t adc_data_addr,
 				   float32_t *result_data,
-				   rfft_window_t window)
+				   rfft_window_t window,
+				   uint8_t p_unit)
 {
 #if USE_ARM_FFT
 	if ((hrfft == NULL) || (result_data == NULL))
@@ -353,24 +376,26 @@ void rfft_start_pf(rfft_handle_t *hrfft,
 		return;
 	}
 
-	rfft_make_single_sided_phase(hrfft, result_data);
+	rfft_make_single_sided_phase(hrfft, result_data, p_unit);
 #endif
 }
 
 /**
- * @brief 启动幅频和相频联合计算。
- * @param hrfft RFFT 句柄。
- * @param adc_data_addr 输入采样缓冲区地址。
- * @param result_data 输出数组，长度至少为 2 * RFFT_RESULT_LENGTH。
- * @param window 窗函数类型。
- * @param unit 幅值输出单位。
- * @note result_data 前半段保存幅值，后半段保存角度制相位。
+ * @brief 启动单边幅频和相频联合计算。
+ * @param[in,out] hrfft RFFT 句柄。
+ * @param[in] adc_data_addr 输入采样缓冲区地址。
+ * @param[out] result_data 输出数组，长度至少为 2 * RFFT_RESULT_LENGTH。
+ * @param[in] window 窗函数类型。
+ * @param[in] unit 幅值输出单位。
+ * @param[in] p_unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
+ * @note result_data 前半段保存幅值，后半段保存相位；参数非法或 RFFT 前处理失败时调用 RFFT_ERROR_HANDLER。
  */
 void rfft_start_af_pf(rfft_handle_t *hrfft,
 					  uint32_t adc_data_addr,
 					  float32_t *result_data,
 					  rfft_window_t window,
-					  rfft_unit_t unit)
+					  rfft_unit_t unit,
+					  uint8_t p_unit)
 {
 #if USE_ARM_FFT
 	if ((hrfft == NULL) || (result_data == NULL))
@@ -385,14 +410,14 @@ void rfft_start_af_pf(rfft_handle_t *hrfft,
 		return;
 	}
 
-	rfft_make_single_sided_amplitude_phase(hrfft, result_data);
+	rfft_make_single_sided_amplitude_phase(hrfft, result_data, p_unit);
 	rfft_convert_unit(result_data, unit);
 #endif
 }
 
 /**
  * @brief RFFT 默认错误处理函数。
- * @note 该函数为弱定义，用户层可重新实现同名函数以覆盖默认死循环行为。
+ * @note 该函数为弱定义；用户层可重新实现同名函数，以覆盖默认死循环行为。
  */
 __WEAK void RFFT_ERROR_HANDLER(void)
 {
