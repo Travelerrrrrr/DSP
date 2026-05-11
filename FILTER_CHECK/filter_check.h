@@ -14,6 +14,13 @@ typedef enum
     FILTER_BANDSTOP = 5
 } FILTER_TYPE;
 
+typedef enum
+{
+    RFFT_UNIT_RAW = 0, // ADC原始数据
+    RFFT_UNIT_DBV,
+    RFFT_UNIT_DBFS
+} FILTER_UNIT;
+
 typedef struct
 {
     uint16_t pRais;

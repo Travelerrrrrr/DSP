@@ -52,7 +52,7 @@ static float read_f32(void *p) { return *(float *)p; }
  * @param ADC_Ref ADC参考电压，默认为3.3V
  * @return FILTER_INFO 滤波器信息结构体
  */
-FILTER_INFO filter_check(uint32_t addr, uint8_t Msize, uint16_t Length, float threshold, uint8_t BitWidth, float ADC_Ref)
+FILTER_INFO filter_check(uint32_t addr, uint8_t Msize, uint16_t Length, FILTER_UNIT unit, float threshold, uint8_t BitWidth, float ADC_Ref)
 {
 #ifdef USE_FILTER_CHECK
     FILTER_INFO filter_info = {0, 0, FILTER_NULL};
@@ -67,7 +67,23 @@ FILTER_INFO filter_check(uint32_t addr, uint8_t Msize, uint16_t Length, float th
     if (ADC_Ref == 0)
         ADC_Ref = 3.3f;
 
-    float vFFTDATAThreshold = expf(threshold * 0.11512925464970f) * 1.41421356237309f / (ADC_Ref / ((1 << BitWidth) - 1);
+    float vFFTDATAThreshold;
+
+    switch (unit)
+    {
+    case RFFT_UNIT_RAW:
+        vFFTDATAThreshold = threashold;
+        break;
+    case RFFT_UNIT_DBV:
+        vFFTDATAThreshold = expf(threshold * 0.11512925464970f) * 1.41421356237309f / (ADC_Ref / ((1 << BitWidth) - 1));
+        break;
+    case RFFT_UNIT_DBFS:
+        vFFTDATAThreshold = expf(threshold * 0.11512925464970f) * ((1 << BitWidth) - 1); // dBFS = 20 * log10(x / ((1<<BitWidth) - 1))
+        break;
+    default:
+        vFFTDATAThreshold = threashold;
+        break;
+    }
 
     uint8_t _addr_Inc = Msize / 8, find = 0;
 
