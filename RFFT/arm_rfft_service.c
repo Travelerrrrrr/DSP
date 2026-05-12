@@ -127,7 +127,7 @@ static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
 
 	inv_reference = 1.0f / reference;
 
-	for (i = 0; i <= RFFT_HALF_LENGTH + 1; i++)
+	for (i = 0; i <= RFFT_HALF_LENGTH; i++)
 	{
 		float32_t value = result_data[i] * inv_reference;
 
