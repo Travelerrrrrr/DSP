@@ -1,9 +1,9 @@
 #ifndef FILTER_CHECK_H
 #define FILTER_CHECK_H
 
-#include "main.h"
+#include <stdint.h>
 
-#ifdef FILTER_CHECK_INFO
+#ifdef USE_FILTER_CHECK
 typedef enum
 {
     FILTER_NULL = 0,
@@ -13,6 +13,13 @@ typedef enum
     FILTER_BANDPASS = 4,
     FILTER_BANDSTOP = 5
 } FILTER_TYPE;
+
+typedef enum
+{
+    RFFT_UNIT_RAW = 0, // ADC原始数据
+    RFFT_UNIT_DBV,
+    RFFT_UNIT_DBFS
+} FILTER_UNIT;
 
 typedef struct
 {

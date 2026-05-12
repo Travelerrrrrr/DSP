@@ -2,8 +2,8 @@
  * @file arm_rfft_service.c
  * @brief 基于 CMSIS-DSP 的实数 FFT 服务层实现。
  * @author Analog
- * @version 1.5
- * @date 2026-05-11
+ * @version 1.8
+ * @date 2026-05-12
  * @note 本文件负责完成 ADC 原始数据搬运、数值格式转换、窗函数处理、
  *       RFFT 计算，以及单边幅频/相频结果提取。
  */
@@ -41,18 +41,33 @@ static float32_t rfft_wrap_phase_rad(float32_t phase)
 }
 
 /**
- * @brief 将工作缓冲区中的 unsigned 32-bit 原始采样原地转换为 float32 数据。
+ * @brief 将工作缓冲区中的 unsigned 32-bit 原始采样原地转换为 float32 数据，并可选叠加偏置。
  * @param[in,out] Src 工作缓冲区指针；转换前按 uint32_t 解释，转换后按 float32_t 解释。
  * @param[in] length 需要转换的数据点数。
- * @note 源数据和目标数据均为 32 bit 宽度，因此可以安全地正序原地转换。
+ * @param[in] offset 转换为 float32 后叠加到每个采样点的偏置值；0.0f 表示不调整。
+ * @note 源数据和目标数据均为 32 bit 宽度，可安全地正序原地转换。
+ *       offset 非 0.0f 时借助 CMSIS-DSP 的 arm_offset_f32（SIMD/VFP 加速）完成逐点偏置叠加。
  */
-static void convert_unsigned_to_float(float32_t *Src, uint32_t length)
+static void convert_unsigned_to_float(float32_t *Src, uint32_t length, float32_t offset)
 {
-	uint16_t i;
+	uint32_t i;
 	uint32_t *buf = (uint32_t *)Src;
-	for (i = 0; i < length; i++)
+
+	if (offset != 0.0f)
 	{
-		Src[i] = (float32_t)buf[i];
+		for (i = 0; i < length; i++)
+		{
+			Src[i] = (float32_t)buf[i];
+		}
+
+		arm_offset_f32(Src, offset, Src, length);
+	}
+	else
+	{
+		for (i = 0; i < length; i++)
+		{
+			Src[i] = (float32_t)buf[i];
+		}
 	}
 }
 
@@ -150,10 +165,12 @@ static void rfft_make_single_sided_amplitude(rfft_handle_t *hrfft, float32_t *re
 	float32_t scale = 2.0f / ((float32_t)FFT_LENGTH * hrfft->window_gain);
 
 	arm_abs_f32(&hrfft->work_buffer[0], &result_data[0], 1U);
+	arm_abs_f32(&hrfft->work_buffer[1], &result_data[RFFT_RESULT_LENGTH], 1U);
 	arm_cmplx_mag_f32(&hrfft->work_buffer[2], &result_data[1], RFFT_RESULT_LENGTH - 1U);
-	arm_scale_f32(result_data, scale, result_data, RFFT_RESULT_LENGTH);
+	arm_scale_f32(result_data, scale, result_data, RFFT_RESULT_LENGTH + 1U);
 	// arm_scale_f32(&result_data[0], 0.5f, &result_data[0], 1U);
 	result_data[0] *= 0.5f;
+	result_data[RFFT_RESULT_LENGTH] *= 0.5f;
 }
 
 /**
@@ -161,17 +178,22 @@ static void rfft_make_single_sided_amplitude(rfft_handle_t *hrfft, float32_t *re
  * @param[in] hrfft RFFT 句柄。
  * @param[out] result_data 输出相频结果，长度至少为 RFFT_RESULT_LENGTH。
  * @param[in] unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
- * @note 直流相位固定为 0，其余频点由 arm_atan2_f32 计算。
+ * @note 直流相位按 imag=0、real=DC 实部由 arm_atan2_f32 计算，其余频点也由 arm_atan2_f32 计算。
  */
 static void rfft_make_single_sided_phase(rfft_handle_t *hrfft, float32_t *result_data, uint8_t unit)
 {
 	uint32_t i;
 	const float32_t *p = &hrfft->work_buffer[2];
+	float32_t dc_phase, nyquist_phase;
 
-	result_data[0] = 0.0f;
+	arm_atan2_f32(0.0f, hrfft->work_buffer[0], &dc_phase);
+	arm_atan2_f32(0.0f, hrfft->work_buffer[1], &nyquist_phase);
 
 	if (unit)
 	{
+		result_data[0] = dc_phase * RFFT_RAD_TO_DEG;
+		result_data[RFFT_RESULT_LENGTH] = nyquist_phase * RFFT_RAD_TO_DEG;
+
 		// 弧度->角度缩放融入循环，省一次 arm_scale_f32 的 O(N) 遍历
 		float32_t phase;
 		for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
@@ -183,6 +205,9 @@ static void rfft_make_single_sided_phase(rfft_handle_t *hrfft, float32_t *result
 	}
 	else
 	{
+		result_data[0] = dc_phase;
+		result_data[RFFT_RESULT_LENGTH] = nyquist_phase;
+
 		for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
 		{
 			arm_atan2_f32(p[1], p[0], &result_data[i]);
@@ -196,7 +221,7 @@ static void rfft_make_single_sided_phase(rfft_handle_t *hrfft, float32_t *result
  * @param[in] hrfft RFFT 句柄。
  * @param[out] result_data 输出数组，长度至少为 2 * RFFT_RESULT_LENGTH。
  * @param[in] unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
- * @note result_data 前半段保存归一化幅值，后半段保存相位；直流相位固定为 0。
+ * @note result_data 前半段保存归一化幅值，后半段保存相位；直流相位按 imag=0、real=DC 实部由 arm_atan2_f32 计算。
  */
 static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32_t *result_data, uint8_t unit)
 {
@@ -205,15 +230,21 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
 	const float32_t scale = 2.0f / ((float32_t)FFT_LENGTH * hrfft->window_gain);
 	float32_t mag;
 	float32_t phase;
+	float32_t dc_phase, nyquist_phase;
 
-	result_data[RFFT_RESULT_LENGTH] = 0.0f;
-
+	arm_atan2_f32(0.0f, hrfft->work_buffer[0], &dc_phase);
+	arm_atan2_f32(0.0f, hrfft->work_buffer[1], &nyquist_phase);
 	// DC 幅值：单边谱 DC 不翻倍，scale*0.5 一次性应用
-	arm_abs_f32(&hrfft->work_buffer[0], &result_data[0], 1U);
-	result_data[0] *= scale * 0.5f;
+	arm_abs_f32(&hrfft->work_buffer[0], &result_data[0], 1U); // abs函数必须在atan2函数之后，以确保直流相位的正确计算
+	arm_abs_f32(&hrfft->work_buffer[1], &result_data[RFFT_RESULT_LENGTH], 1U);
+	result_data[0] *= scale * 0.5f; // 0.5f抵消scale中的合并系数
+	result_data[RFFT_RESULT_LENGTH] *= scale * 0.5f;
 
 	if (unit)
 	{
+		result_data[RFFT_RESULT_LENGTH + 1] = dc_phase * RFFT_RAD_TO_DEG;
+		result_data[RFFT_RESULT_LENGTH * 2 + 1] = nyquist_phase * RFFT_RAD_TO_DEG;
+
 		// 幅值缩放与弧度->角度缩放都融入循环，省两次 arm_scale_f32 的 O(N) 遍历
 		for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
 		{
@@ -224,11 +255,13 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
 			result_data[i] = mag * scale;
 
 			arm_atan2_f32(imag, real, &phase);
-			result_data[RFFT_RESULT_LENGTH + i] = phase * RFFT_RAD_TO_DEG;
+			result_data[RFFT_RESULT_LENGTH + 1 + i] = phase * RFFT_RAD_TO_DEG;
 		}
 	}
 	else
 	{
+		result_data[RFFT_RESULT_LENGTH + 1] = dc_phase;
+		result_data[RFFT_RESULT_LENGTH * 2 + 1] = nyquist_phase;
 		for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
 		{
 			float32_t real = *p++;
@@ -237,7 +270,7 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
 			arm_sqrt_f32((real * real) + (imag * imag), &mag);
 			result_data[i] = mag * scale;
 
-			arm_atan2_f32(imag, real, &result_data[RFFT_RESULT_LENGTH + i]);
+			arm_atan2_f32(imag, real, &result_data[RFFT_RESULT_LENGTH + 1 + i]);
 		}
 	}
 }
@@ -272,10 +305,11 @@ static arm_status rfft_copy_input(rfft_handle_t *hrfft, uint32_t adc_data_addr)
  * @param[in,out] hrfft RFFT 句柄。
  * @param[in] adc_data_addr 输入采样缓冲区地址。
  * @param[in] window 窗函数类型。
+ * @param[in] offset 转换为 float32 后叠加到每个采样点的偏置值；0.0f 表示不调整。
  * @return ARM_MATH_SUCCESS 表示 RFFT 前处理和计算成功，其他返回值来自输入搬运过程。
- * @note 处理流程为：复制输入、unsigned 转 float、生成并应用窗函数、执行 arm_rfft_fast_f32。
+ * @note 处理流程为：复制输入、unsigned 转 float（可选叠加 offset）、生成并应用窗函数、执行 arm_rfft_fast_f32。
  */
-static arm_status rfft_prepare_transform(rfft_handle_t *hrfft, uint32_t adc_data_addr, rfft_window_t window)
+static arm_status rfft_prepare_transform(rfft_handle_t *hrfft, uint32_t adc_data_addr, rfft_window_t window, float32_t offset)
 {
 	arm_status status = rfft_copy_input(hrfft, adc_data_addr);
 
@@ -284,7 +318,8 @@ static arm_status rfft_prepare_transform(rfft_handle_t *hrfft, uint32_t adc_data
 		return status;
 	}
 
-	convert_unsigned_to_float(hrfft->work_buffer, FFT_LENGTH);
+	convert_unsigned_to_float(hrfft->work_buffer, FFT_LENGTH, offset);
+
 	if (window != RFFT_WINDOW_RECTANGULAR)
 	{
 		rfft_generate_window(hrfft, window);
@@ -343,7 +378,8 @@ arm_status rfft_handle_init(rfft_handle_t *hrfft, const rfft_dma_t *dma)
 void rfft_start(rfft_handle_t *hrfft,
 				uint32_t adc_data_addr,
 				float32_t *result_data,
-				rfft_window_t window)
+				rfft_window_t window,
+				float32_t offset)
 {
 #if USE_ARM_FFT
 	if ((hrfft == NULL) || (result_data == NULL))
@@ -352,7 +388,7 @@ void rfft_start(rfft_handle_t *hrfft,
 		return;
 	}
 
-	if (rfft_prepare_transform(hrfft, adc_data_addr, window) != ARM_MATH_SUCCESS)
+	if (rfft_prepare_transform(hrfft, adc_data_addr, window, offset) != ARM_MATH_SUCCESS)
 	{
 		RFFT_ERROR_HANDLER();
 		return;
@@ -367,13 +403,15 @@ void rfft_start(rfft_handle_t *hrfft,
  * @param[out] result_data 输出幅频结果，长度至少为 RFFT_RESULT_LENGTH。
  * @param[in] window 窗函数类型。
  * @param[in] unit 幅值输出单位。
+ * @param[in] offset 转换为 float32 后叠加到每个采样点的偏置值；0.0f 表示不调整。
  * @note 参数非法或 RFFT 前处理失败时调用 RFFT_ERROR_HANDLER。
  */
 void rfft_start_af(rfft_handle_t *hrfft,
 				   uint32_t adc_data_addr,
 				   float32_t *result_data,
 				   rfft_window_t window,
-				   rfft_unit_t unit)
+				   rfft_unit_t unit,
+				   float32_t offset)
 {
 #if USE_ARM_FFT
 	if ((hrfft == NULL) || (result_data == NULL))
@@ -382,7 +420,7 @@ void rfft_start_af(rfft_handle_t *hrfft,
 		return;
 	}
 
-	if (rfft_prepare_transform(hrfft, adc_data_addr, window) != ARM_MATH_SUCCESS)
+	if (rfft_prepare_transform(hrfft, adc_data_addr, window, offset) != ARM_MATH_SUCCESS)
 	{
 		RFFT_ERROR_HANDLER();
 		return;
@@ -400,13 +438,15 @@ void rfft_start_af(rfft_handle_t *hrfft,
  * @param[out] result_data 输出相频结果，长度至少为 RFFT_RESULT_LENGTH。
  * @param[in] window 窗函数类型。
  * @param[in] p_unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
+ * @param[in] offset 转换为 float32 后叠加到每个采样点的偏置值；0.0f 表示不调整。
  * @note 参数非法或 RFFT 前处理失败时调用 RFFT_ERROR_HANDLER。
  */
 void rfft_start_pf(rfft_handle_t *hrfft,
 				   uint32_t adc_data_addr,
 				   float32_t *result_data,
 				   rfft_window_t window,
-				   uint8_t p_unit)
+				   uint8_t p_unit,
+				   float32_t offset)
 {
 #if USE_ARM_FFT
 	if ((hrfft == NULL) || (result_data == NULL))
@@ -415,7 +455,7 @@ void rfft_start_pf(rfft_handle_t *hrfft,
 		return;
 	}
 
-	if (rfft_prepare_transform(hrfft, adc_data_addr, window) != ARM_MATH_SUCCESS)
+	if (rfft_prepare_transform(hrfft, adc_data_addr, window, offset) != ARM_MATH_SUCCESS)
 	{
 		RFFT_ERROR_HANDLER();
 		return;
@@ -433,6 +473,7 @@ void rfft_start_pf(rfft_handle_t *hrfft,
  * @param[in] window 窗函数类型。
  * @param[in] unit 幅值输出单位。
  * @param[in] p_unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
+ * @param[in] offset 转换为 float32 后叠加到每个采样点的偏置值；0.0f 表示不调整。
  * @note result_data 前半段保存幅值，后半段保存相位；参数非法或 RFFT 前处理失败时调用 RFFT_ERROR_HANDLER。
  */
 void rfft_start_af_pf(rfft_handle_t *hrfft,
@@ -440,7 +481,8 @@ void rfft_start_af_pf(rfft_handle_t *hrfft,
 					  float32_t *result_data,
 					  rfft_window_t window,
 					  rfft_unit_t unit,
-					  uint8_t p_unit)
+					  uint8_t p_unit,
+					  float32_t offset)
 {
 #if USE_ARM_FFT
 	if ((hrfft == NULL) || (result_data == NULL))
@@ -449,7 +491,7 @@ void rfft_start_af_pf(rfft_handle_t *hrfft,
 		return;
 	}
 
-	if (rfft_prepare_transform(hrfft, adc_data_addr, window) != ARM_MATH_SUCCESS)
+	if (rfft_prepare_transform(hrfft, adc_data_addr, window, offset) != ARM_MATH_SUCCESS)
 	{
 		RFFT_ERROR_HANDLER();
 		return;
@@ -460,60 +502,96 @@ void rfft_start_af_pf(rfft_handle_t *hrfft,
 #endif
 }
 
+// void irfft_start(rfft_handle_t *hrfft,
+// 				 const float32_t *rfft_af,
+// 				 const float32_t *rfft_pf,
+// 				 float32_t *irfft,
+// 				 const float32_t *bode,
+// 				 const float32_t *PF,
+// 				 uint8_t p_unit)
+// {
+// #if USE_ARM_FFT
+// 	if ((hrfft == NULL) || (rfft_af == NULL) || (rfft_pf == NULL) || (irfft == NULL) || (bode == NULL) || (PF == NULL))
+// 	{
+// 		RFFT_ERROR_HANDLER();
+// 		return;
+// 	}
+
+// 	const float32_t dc_scale = (float32_t)FFT_LENGTH;
+// 	const float32_t ac_scale = 0.5f * (float32_t)FFT_LENGTH;
+
+// 	/* CMSIS RIFFT expects unnormalized packed DFT bins, not single-sided amplitude. */
+// 	irfft[0] = rfft_af[0] * bode[0] * dc_scale;
+// 	irfft[1] = 0.0f;
+
+// 	if (p_unit)
+// 	{
+// 		for (uint16_t i = 1; i < RFFT_RESULT_LENGTH; i++)
+// 		{
+// 			float32_t mag = rfft_af[i] * bode[i] * ac_scale;
+// 			float32_t phase = rfft_pf[i];
+
+// 			/* rfft_pf is radians; p_unit describes only the PF array. */
+// 			phase += PF[i] * RFFT_DEG_TO_RAD;
+// 			phase = rfft_wrap_phase_rad(phase);
+
+// 			irfft[i * 2] = mag * cosf(phase);
+// 			irfft[i * 2 + 1] = mag * sinf(phase);
+// 		}
+// 	}
+// 	else
+// 	{
+// 		for (uint16_t i = 1; i < RFFT_RESULT_LENGTH; i++)
+// 		{
+// 			float32_t mag = rfft_af[i] * bode[i] * ac_scale;
+// 			float32_t phase = rfft_pf[i];
+
+// 			/* rfft_pf is radians; p_unit describes only the PF array. */
+// 			phase += PF[i];
+// 			phase = rfft_wrap_phase_rad(phase);
+
+// 			irfft[i * 2] = mag * cosf(phase);
+// 			irfft[i * 2 + 1] = mag * sinf(phase);
+// 		}
+// 	}
+
+// 	arm_rfft_fast_f32(&hrfft->fft_instance, irfft, irfft, 1);
+
+// #endif
+// }
+
 void irfft_start(rfft_handle_t *hrfft,
-				 const float32_t *rfft_af,
-				 const float32_t *rfft_pf,
+				 float32_t *rfft_complex,
 				 float32_t *irfft,
 				 const float32_t *bode,
 				 const float32_t *PF,
 				 uint8_t p_unit)
 {
 #if USE_ARM_FFT
-	if ((hrfft == NULL) || (rfft_af == NULL) || (rfft_pf == NULL) || (irfft == NULL) || (bode == NULL) || (PF == NULL))
+	if ((hrfft == NULL) || (rfft_complex == NULL) || (irfft == NULL) || (bode == NULL) || (PF == NULL))
 	{
 		RFFT_ERROR_HANDLER();
 		return;
 	}
 
-	const float32_t dc_scale = (float32_t)FFT_LENGTH;
-	const float32_t ac_scale = 0.5f * (float32_t)FFT_LENGTH;
+	const float32_t phase_scale = p_unit ? RFFT_DEG_TO_RAD : 1.0f;
 
-	/* CMSIS RIFFT expects unnormalized packed DFT bins, not single-sided amplitude. */
-	irfft[0] = rfft_af[0] * bode[0] * dc_scale;
-	irfft[1] = 0.0f;
+	rfft_complex[0] *= bode[0] * cosf(PF[0] * phase_scale);
+	rfft_complex[1] *= bode[RFFT_RESULT_LENGTH] * cosf(PF[RFFT_RESULT_LENGTH] * phase_scale);
 
-	if (p_unit)
+	for (uint16_t i = 1; i < RFFT_RESULT_LENGTH; i++)
 	{
-		for (uint16_t i = 1; i < RFFT_RESULT_LENGTH; i++)
-		{
-			float32_t mag = rfft_af[i] * bode[i] * ac_scale;
-			float32_t phase = rfft_pf[i];
+		float32_t phase = PF[i] * phase_scale;
+		float32_t Hr = bode[i] * cosf(phase);
+		float32_t Hi = bode[i] * sinf(phase);
+		float32_t Xr = rfft_complex[i * 2];
+		float32_t Xi = rfft_complex[i * 2 + 1];
 
-			/* rfft_pf is radians; p_unit describes only the PF array. */
-			phase += PF[i] * RFFT_DEG_TO_RAD;
-			phase = rfft_wrap_phase_rad(phase);
-
-			irfft[i * 2] = mag * cosf(phase);
-			irfft[i * 2 + 1] = mag * sinf(phase);
-		}
-	}
-	else
-	{
-		for (uint16_t i = 1; i < RFFT_RESULT_LENGTH; i++)
-		{
-			float32_t mag = rfft_af[i] * bode[i] * ac_scale;
-			float32_t phase = rfft_pf[i];
-
-			/* rfft_pf is radians; p_unit describes only the PF array. */
-			phase += PF[i];
-			phase = rfft_wrap_phase_rad(phase);
-
-			irfft[i * 2] = mag * cosf(phase);
-			irfft[i * 2 + 1] = mag * sinf(phase);
-		}
+		rfft_complex[i * 2] = Xr * Hr - Xi * Hi;
+		rfft_complex[i * 2 + 1] = Xr * Hi + Xi * Hr;
 	}
 
-	arm_rfft_fast_f32(&hrfft->fft_instance, irfft, irfft, 1);
+	arm_rfft_fast_f32(&hrfft->fft_instance, rfft_complex, irfft, 1);
 
 #endif
 }
