@@ -2,8 +2,8 @@
  * @file arm_rfft_service.c
  * @brief 基于 CMSIS-DSP 的实数 FFT 服务层实现。
  * @author Analog
- * @version 1.5
- * @date 2026-05-11
+ * @version 2.0
+ * @date 2026-05-12
  * @note 本文件负责完成 ADC 原始数据搬运、数值格式转换、窗函数处理、
  *       RFFT 计算，以及单边幅频/相频结果提取。
  */
