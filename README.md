@@ -2,7 +2,9 @@
 
 ## [RFFT](https://github.com/Travelerrrrrr/DSP/tree/main/RFFT)
 
-基于arm_math的快速rfft服务层，目前包含幅频函数，相频函数，幅频相频函数
+基于arm_math的快速rfft服务层
+
+目前包含复数数据函数，幅频数据函数，相频数据函数，幅频相频数据函数，逆FFT计算函数
 
 ## [FILTER_CHECK](https://github.com/Travelerrrrrr/DSP/tree/main/FILTER_CHECK)
 
