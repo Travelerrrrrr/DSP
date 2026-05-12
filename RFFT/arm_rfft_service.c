@@ -2,7 +2,7 @@
  * @file arm_rfft_service.c
  * @brief 基于 CMSIS-DSP 的实数 FFT 服务层实现。
  * @author Analog
- * @version 2.0
+ * @version 1.5
  * @date 2026-05-11
  * @note 本文件负责完成 ADC 原始数据搬运、数值格式转换、窗函数处理、
  *       RFFT 计算，以及单边幅频/相频结果提取。
@@ -125,7 +125,7 @@ static void rfft_generate_window(rfft_handle_t *hrfft, rfft_window_t window)
 
 /**
  * @brief 将单边幅频结果转换为指定单位。
- * @param[in,out] result_data 幅频结果数组，长度至少为 RFFT_RESULT_LENGTH。
+ * @param[in,out] result_data 幅频结果数组，长度至少为 RFFT_HALF_LENGTH。
  * @param[in] unit 目标单位，可选择 RAW、dBV 或 dBFS。
  * @note RAW 模式不做转换；dB 模式下执行 20log10(x/reference)，并对输入下限做裁剪以避免 log(0)。
  */
@@ -136,11 +136,10 @@ static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
 	switch (unit)
 	{
 	case RFFT_UNIT_DBV:
-		arm_scale_f32(&result_data[1], RFFT_INV_SQRT2, &result_data[1], RFFT_RESULT_LENGTH - 1U);
 		reference = RFFT_DBV_REFERENCE_ADC_CODE;
 		break;
 	case RFFT_UNIT_DBFS:
-		reference = RFFT_DBFS_REFERENCE_V;
+		reference = RFFT_DBFS_REFERENCE_CODE;
 		break;
 	case RFFT_UNIT_RAW:
 	default:
@@ -148,16 +147,16 @@ static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
 		return;
 	}
 
-	arm_scale_f32(result_data, 1.0f / reference, result_data, RFFT_RESULT_LENGTH);				  // 20log10(x/reference)
-	arm_clip_f32(result_data, result_data, RFFT_LOG_FLOOR, RFFT_LOG_CEILING, RFFT_RESULT_LENGTH); // 仅为O(N)，为保证系统稳定，必须保留
-	arm_vlog_f32(result_data, result_data, RFFT_RESULT_LENGTH);
-	arm_scale_f32(result_data, RFFT_LN_TO_20LOG10, result_data, RFFT_RESULT_LENGTH); // 20log10(x) = ln(x) * 20/ln(10)
+	arm_scale_f32(result_data, 1.0f / reference, result_data, RFFT_HALF_LENGTH);				// 20log10(x/reference)
+	arm_clip_f32(result_data, result_data, RFFT_LOG_FLOOR, RFFT_LOG_CEILING, RFFT_HALF_LENGTH); // 仅为O(N)，为保证系统稳定，必须保留
+	arm_vlog_f32(result_data, result_data, RFFT_HALF_LENGTH);
+	arm_scale_f32(result_data, RFFT_LN_TO_20LOG10, result_data, RFFT_HALF_LENGTH); // 20log10(x) = ln(x) * 20/ln(10)
 }
 
 /**
  * @brief 从 RFFT 复数结果中提取并归一化单边幅频结果。
  * @param[in] hrfft RFFT 句柄。
- * @param[in,out] result_data 输入为 packed RFFT 复数（长度 FFT_LENGTH），原地压缩为单边幅频结果（长度 RFFT_RESULT_LENGTH+1）。
+ * @param[in,out] result_data 输入为 packed RFFT 复数（长度 FFT_LENGTH），原地压缩为单边幅频结果（长度 RFFT_HALF_LENGTH+1）。
  * @note 非直流频点按单边谱幅值缩放，直流分量额外乘以 0.5 以避免被双边合并系数放大。
  *       原地压缩安全性：arm_cmplx_mag_f32 写 result_data[k] 读 result_data[2k..2k+1]，k 顺序递增时写下标永远小于读下标，无冲突。
  *       Nyquist 必须先读后写，否则 result_data[1] 会被 DC 的 abs 覆盖。
@@ -167,18 +166,18 @@ static void rfft_make_single_sided_amplitude(rfft_handle_t *hrfft, float32_t *re
 	float32_t scale = 2.0f / ((float32_t)FFT_LENGTH * hrfft->window_gain);
 	float32_t nyquist = result_data[1];
 
-	arm_cmplx_mag_f32(&result_data[2], &result_data[1], RFFT_RESULT_LENGTH - 1U);
+	arm_cmplx_mag_f32(&result_data[2], &result_data[1], RFFT_HALF_LENGTH - 1U);
 	result_data[0] = fabsf(result_data[0]);
-	result_data[RFFT_RESULT_LENGTH] = fabsf(nyquist);
-	arm_scale_f32(result_data, scale, result_data, RFFT_RESULT_LENGTH + 1U);
+	result_data[RFFT_HALF_LENGTH] = fabsf(nyquist);
+	arm_scale_f32(result_data, scale, result_data, RFFT_HALF_LENGTH + 1U);
 	result_data[0] *= 0.5f;
-	result_data[RFFT_RESULT_LENGTH] *= 0.5f;
+	result_data[RFFT_HALF_LENGTH] *= 0.5f;
 }
 
 /**
  * @brief 从 RFFT 复数结果中提取单边相频结果。
- * @param[in] hrfft RFFT 句柄（未使用，保留以维持调用一致性）。
- * @param[in,out] result_data 输入为 packed RFFT 复数（长度 FFT_LENGTH），原地压缩为单边相频结果（长度 RFFT_RESULT_LENGTH+1）。
+ * @param[in] hrfft RFFT 句柄（未使用）。
+ * @param[in,out] result_data 输入为 packed RFFT 复数（长度 FFT_LENGTH），原地压缩为单边相频结果（长度 RFFT_HALF_LENGTH+1）。
  * @param[in] unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
  * @note 原地压缩：循环顺序 k=1..N/2-1 写 result_data[k] 读 result_data[2k..2k+1]，写下标永远小于读下标，无冲突。
  *       DC/Nyquist 实部先暂存到局部变量，Nyquist 相位必须循环结束后再写入，避免在 k=N/4 时覆盖 X[N/4].real。
@@ -198,22 +197,22 @@ static void rfft_make_single_sided_phase(rfft_handle_t *hrfft, float32_t *result
 	{
 		// 弧度->角度缩放融入循环，省一次 arm_scale_f32 的 O(N) 遍历
 		float32_t phase;
-		for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
+		for (i = 1U; i < RFFT_HALF_LENGTH; i++)
 		{
 			arm_atan2_f32(result_data[2 * i + 1], result_data[2 * i], &phase);
 			result_data[i] = phase * RFFT_RAD_TO_DEG;
 		}
 		result_data[0] = dc_phase * RFFT_RAD_TO_DEG;
-		result_data[RFFT_RESULT_LENGTH] = nyquist_phase * RFFT_RAD_TO_DEG;
+		result_data[RFFT_HALF_LENGTH] = nyquist_phase * RFFT_RAD_TO_DEG;
 	}
 	else
 	{
-		for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
+		for (i = 1U; i < RFFT_HALF_LENGTH; i++)
 		{
 			arm_atan2_f32(result_data[2 * i + 1], result_data[2 * i], &result_data[i]);
 		}
 		result_data[0] = dc_phase;
-		result_data[RFFT_RESULT_LENGTH] = nyquist_phase;
+		result_data[RFFT_HALF_LENGTH] = nyquist_phase;
 	}
 }
 
@@ -239,7 +238,7 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
 	arm_atan2_f32(0.0f, nyquist_real, &nyquist_phase);
 
 	// 幅值原地、相位暂存到 scratch_buffer
-	for (i = 1U; i < RFFT_RESULT_LENGTH; i++)
+	for (i = 1U; i < RFFT_HALF_LENGTH; i++)
 	{
 		float32_t real = result_data[2 * i];
 		float32_t imag = result_data[2 * i + 1];
@@ -253,14 +252,14 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
 
 	// DC / Nyquist 幅值（单边谱 DC 不翻倍，scale*0.5 一次性应用）
 	result_data[0] = fabsf(dc_real) * scale * 0.5f;
-	result_data[RFFT_RESULT_LENGTH] = fabsf(nyquist_real) * scale * 0.5f;
+	result_data[RFFT_HALF_LENGTH] = fabsf(nyquist_real) * scale * 0.5f;
 
 	// 写相位区：DC、Nyquist 单独写，其余从 scratch_buffer 整段搬运
-	result_data[RFFT_RESULT_LENGTH + 1] = dc_phase * phase_unit_scale;
-	memcpy(&result_data[RFFT_RESULT_LENGTH + 2],
+	result_data[RFFT_HALF_LENGTH + 1] = dc_phase * phase_unit_scale;
+	memcpy(&result_data[RFFT_HALF_LENGTH + 2],
 		   &hrfft->scratch_buffer[1],
-		   (RFFT_RESULT_LENGTH - 1U) * sizeof(float32_t));
-	result_data[RFFT_RESULT_LENGTH * 2 + 1] = nyquist_phase * phase_unit_scale;
+		   (RFFT_HALF_LENGTH - 1U) * sizeof(float32_t));
+	result_data[RFFT_HALF_LENGTH * 2 + 1] = nyquist_phase * phase_unit_scale;
 }
 
 /**
@@ -391,7 +390,7 @@ void rfft_start(rfft_handle_t *hrfft,
  * @brief 启动单边幅频计算。
  * @param[in,out] hrfft RFFT 句柄。
  * @param[in] adc_data_addr 输入采样缓冲区地址。
- * @param[out] result_data 输出幅频结果，长度至少为 RFFT_RESULT_LENGTH。
+ * @param[out] result_data 输出幅频结果，长度至少为 RFFT_HALF_LENGTH。
  * @param[in] window 窗函数类型。
  * @param[in] unit 幅值输出单位。
  * @param[in] offset 转换为 float32 后叠加到每个采样点的偏置值；0.0f 表示不调整。
@@ -426,7 +425,7 @@ void rfft_start_af(rfft_handle_t *hrfft,
  * @brief 启动单边相频计算。
  * @param[in,out] hrfft RFFT 句柄。
  * @param[in] adc_data_addr 输入采样缓冲区地址。
- * @param[out] result_data 输出相频结果，长度至少为 RFFT_RESULT_LENGTH。
+ * @param[out] result_data 输出相频结果，长度至少为 RFFT_HALF_LENGTH。
  * @param[in] window 窗函数类型。
  * @param[in] p_unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
  * @param[in] offset 转换为 float32 后叠加到每个采样点的偏置值；0.0f 表示不调整。
@@ -460,7 +459,7 @@ void rfft_start_pf(rfft_handle_t *hrfft,
  * @brief 启动单边幅频和相频联合计算。
  * @param[in,out] hrfft RFFT 句柄。
  * @param[in] adc_data_addr 输入采样缓冲区地址。
- * @param[out] result_data 输出数组，长度至少为 2 * RFFT_RESULT_LENGTH。
+ * @param[out] result_data 输出数组，长度至少为 2 * RFFT_HALF_LENGTH。
  * @param[in] window 窗函数类型。
  * @param[in] unit 幅值输出单位。
  * @param[in] p_unit 相位输出单位选择；0 表示弧度，非 0 表示角度。
@@ -501,7 +500,7 @@ void rfft_start_af_pf(rfft_handle_t *hrfft,
  * @param[in] bode 幅值补偿数组，长度至少为 RFFT_UNIQUE_RESULT_LENGTH。
  * @param[in] PF 相位补偿数组，长度至少为 RFFT_UNIQUE_RESULT_LENGTH。
  * @param[in] p_unit PF 的相位单位；0 表示弧度，非 0 表示角度。
- * @note bode/PF 的下标 0 表示 DC，1..RFFT_RESULT_LENGTH-1 表示普通正频率点，RFFT_RESULT_LENGTH 表示 Nyquist 点。
+ * @note bode/PF 的下标 0 表示 DC，1..RFFT_HALF_LENGTH-1 表示普通正频率点，RFFT_HALF_LENGTH 表示 Nyquist 点。
  *       DC 和 Nyquist 在 packed RFFT 中必须保持纯实数，因此仅使用补偿相位的 cos 分量。
  *       参数非法时调用 RFFT_ERROR_HANDLER。
  */
@@ -523,9 +522,9 @@ void irfft_start(rfft_handle_t *hrfft,
 
 	// DC/Nyquist 在 packed 格式下是纯实数，只取补偿相位的 cos 分量
 	rfft_complex[0] *= bode[0] * cosf(PF[0] * phase_scale);
-	rfft_complex[1] *= bode[RFFT_RESULT_LENGTH] * cosf(PF[RFFT_RESULT_LENGTH] * phase_scale);
+	rfft_complex[1] *= bode[RFFT_HALF_LENGTH] * cosf(PF[RFFT_HALF_LENGTH] * phase_scale);
 
-	for (uint16_t i = 1; i < RFFT_RESULT_LENGTH; i++)
+	for (uint16_t i = 1; i < RFFT_HALF_LENGTH; i++)
 	{
 		float32_t phase = PF[i] * phase_scale;
 		float32_t Hr = bode[i] * cosf(phase);
