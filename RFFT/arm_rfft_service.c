@@ -9,64 +9,40 @@
  */
 
 #include "../User/DSP/arm_rfft_service.h"
+#include <math.h>
 #include <string.h>
 
 #define RFFT_DMA_TIMEOUT 0xFFFFU
 #define RFFT_LOG_FLOOR 1.0e-20f
 #define RFFT_LOG_CEILING 1.0e20f
 #define RFFT_LN_TO_20LOG10 8.68588963806503f
-#define RFFT_INV_SQRT2 0.70710678118654f
-#define RFFT_PI 3.14159265358979f
-#define RFFT_TWO_PI 6.28318530717959f
-#define RFFT_INV_TWO_PI 0.15915494309190f
 #define RFFT_RAD_TO_DEG 57.29577951308232f
 #define RFFT_DEG_TO_RAD 0.01745329251994f
 
-static float32_t rfft_wrap_phase_rad(float32_t phase)
-{
-	int32_t turns = (int32_t)(phase * RFFT_INV_TWO_PI);
-
-	phase -= (float32_t)turns * RFFT_TWO_PI;
-
-	if (phase > RFFT_PI)
-	{
-		phase -= RFFT_TWO_PI;
-	}
-	else if (phase < -RFFT_PI)
-	{
-		phase += RFFT_TWO_PI;
-	}
-
-	return phase;
-}
-
 /**
- * @brief 将工作缓冲区中的 unsigned 32-bit 原始采样原地转换为 float32 数据，并可选叠加偏置。
- * @param[in,out] Src 工作缓冲区指针；转换前按 uint32_t 解释，转换后按 float32_t 解释。
+ * @brief 将 unsigned 32-bit 原始采样转换为 float32 数据，并可选叠加偏置。
+ * @param[out] Dst 目标 float32_t 缓冲区。
+ * @param[in] Src 源 uint32_t 采样缓冲区。
  * @param[in] length 需要转换的数据点数。
  * @param[in] offset 转换为 float32 后叠加到每个采样点的偏置值；0.0f 表示不调整。
- * @note 源数据和目标数据均为 32 bit 宽度，可安全地正序原地转换。
- *       offset 非 0.0f 时借助 CMSIS-DSP 的 arm_offset_f32（SIMD/VFP 加速）完成逐点偏置叠加。
+ * @note 源数据和目标数据均为 32 bit 宽度，Dst 与 Src 指向同一缓冲区时可安全地正序原地转换。
  */
-static void convert_unsigned_to_float(float32_t *Src, uint32_t length, float32_t offset)
+static void convert_uint32_to_float(float32_t *Dst, const uint32_t *Src, uint32_t length, float32_t offset)
 {
 	uint32_t i;
-	uint32_t *buf = (uint32_t *)Src;
 
 	if (offset != 0.0f)
 	{
-		for (i = 0; i < length; i++)
+		for (i = 0U; i < length; i++)
 		{
-			Src[i] = (float32_t)buf[i];
+			Dst[i] = (float32_t)Src[i] + offset;
 		}
-
-		arm_offset_f32(Src, offset, Src, length);
 	}
 	else
 	{
-		for (i = 0; i < length; i++)
+		for (i = 0U; i < length; i++)
 		{
-			Src[i] = (float32_t)buf[i];
+			Dst[i] = (float32_t)Src[i];
 		}
 	}
 }
@@ -131,7 +107,9 @@ static void rfft_generate_window(rfft_handle_t *hrfft, rfft_window_t window)
  */
 static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
 {
+	uint32_t i;
 	float32_t reference = 1.0f;
+	float32_t inv_reference;
 
 	switch (unit)
 	{
@@ -147,10 +125,26 @@ static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
 		return;
 	}
 
-	arm_scale_f32(result_data, 1.0f / reference, result_data, RFFT_HALF_LENGTH);				// 20log10(x/reference)
-	arm_clip_f32(result_data, result_data, RFFT_LOG_FLOOR, RFFT_LOG_CEILING, RFFT_HALF_LENGTH); // 仅为O(N)，为保证系统稳定，必须保留
-	arm_vlog_f32(result_data, result_data, RFFT_HALF_LENGTH);
-	arm_scale_f32(result_data, RFFT_LN_TO_20LOG10, result_data, RFFT_HALF_LENGTH); // 20log10(x) = ln(x) * 20/ln(10)
+	inv_reference = 1.0f / reference;
+
+	for (i = 0; i <= RFFT_HALF_LENGTH + 1; i++)
+	{
+		float32_t value = result_data[i] * inv_reference;
+
+		if (value < RFFT_LOG_FLOOR)
+		{
+			value = RFFT_LOG_FLOOR;
+		}
+		// else if (value > RFFT_LOG_CEILING)
+		// {
+		// 	value = RFFT_LOG_CEILING;
+		// }
+
+		result_data[i] = logf(value) * RFFT_LN_TO_20LOG10; // 20log10(x) = ln(x) * 20/ln(10)
+	}
+
+	// result_data[0] = logf(result_data[0] * inv_reference) * RFFT_LN_TO_20LOG10;
+	// result_data[RFFT_HALF_LENGTH] = logf(result_data[RFFT_HALF_LENGTH] * inv_reference) * RFFT_LN_TO_20LOG10;
 }
 
 /**
@@ -158,20 +152,31 @@ static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
  * @param[in] hrfft RFFT 句柄。
  * @param[in,out] result_data 输入为 packed RFFT 复数（长度 FFT_LENGTH），原地压缩为单边幅频结果（长度 RFFT_HALF_LENGTH+1）。
  * @note 非直流频点按单边谱幅值缩放，直流分量额外乘以 0.5 以避免被双边合并系数放大。
- *       原地压缩安全性：arm_cmplx_mag_f32 写 result_data[k] 读 result_data[2k..2k+1]，k 顺序递增时写下标永远小于读下标，无冲突。
+ *       原地压缩安全性：循环写 result_data[k] 读 result_data[2k..2k+1]，k 顺序递增时写下标永远小于读下标，无冲突。
  *       Nyquist 必须先读后写，否则 result_data[1] 会被 DC 的 abs 覆盖。
  */
 static void rfft_make_single_sided_amplitude(rfft_handle_t *hrfft, float32_t *result_data)
 {
-	float32_t scale = 2.0f / ((float32_t)FFT_LENGTH * hrfft->window_gain);
-	float32_t nyquist = result_data[1];
+	uint32_t i;
+	const float32_t scale = 2.0f / ((float32_t)FFT_LENGTH * hrfft->window_gain);
+	const float32_t edge_scale = scale * 0.5f;
+	const float32_t dc_real = result_data[0];
+	const float32_t nyquist_real = result_data[1];
+	const float32_t *src = &result_data[2];
+	float32_t *dst = &result_data[1];
 
-	arm_cmplx_mag_f32(&result_data[2], &result_data[1], RFFT_HALF_LENGTH - 1U);
-	result_data[0] = fabsf(result_data[0]);
-	result_data[RFFT_HALF_LENGTH] = fabsf(nyquist);
-	arm_scale_f32(result_data, scale, result_data, RFFT_HALF_LENGTH + 1U);
-	result_data[0] *= 0.5f;
-	result_data[RFFT_HALF_LENGTH] *= 0.5f;
+	for (i = 1U; i < RFFT_HALF_LENGTH; i++)
+	{
+		const float32_t real = src[0]; // 优化运行效率
+		const float32_t imag = src[1];
+
+		*dst++ = sqrtf((real * real) + (imag * imag)) * scale; // 要覆盖的地址
+
+		src += 2U;
+	}
+
+	result_data[0] = fabsf(dc_real) * edge_scale;
+	result_data[RFFT_HALF_LENGTH] = fabsf(nyquist_real) * edge_scale;
 }
 
 /**
@@ -186,34 +191,20 @@ static void rfft_make_single_sided_phase(rfft_handle_t *hrfft, float32_t *result
 {
 	(void)hrfft;
 	uint32_t i;
-	float32_t dc_real = result_data[0];
-	float32_t nyquist_real = result_data[1];
-	float32_t dc_phase, nyquist_phase;
+	const float32_t dc_real = result_data[0];
+	const float32_t nyquist_real = result_data[1];
+	const float32_t phase_unit_scale = unit ? RFFT_RAD_TO_DEG : 1.0f;
+	const float32_t *src = &result_data[2];
+	float32_t *dst = &result_data[1];
 
-	arm_atan2_f32(0.0f, dc_real, &dc_phase);
-	arm_atan2_f32(0.0f, nyquist_real, &nyquist_phase);
+	for (i = 1U; i < RFFT_HALF_LENGTH; i++)
+	{
+		*dst++ = atan2f(src[1], src[0]) * phase_unit_scale;
+		src += 2U;
+	}
 
-	if (unit)
-	{
-		// 弧度->角度缩放融入循环，省一次 arm_scale_f32 的 O(N) 遍历
-		float32_t phase;
-		for (i = 1U; i < RFFT_HALF_LENGTH; i++)
-		{
-			arm_atan2_f32(result_data[2 * i + 1], result_data[2 * i], &phase);
-			result_data[i] = phase * RFFT_RAD_TO_DEG;
-		}
-		result_data[0] = dc_phase * RFFT_RAD_TO_DEG;
-		result_data[RFFT_HALF_LENGTH] = nyquist_phase * RFFT_RAD_TO_DEG;
-	}
-	else
-	{
-		for (i = 1U; i < RFFT_HALF_LENGTH; i++)
-		{
-			arm_atan2_f32(result_data[2 * i + 1], result_data[2 * i], &result_data[i]);
-		}
-		result_data[0] = dc_phase;
-		result_data[RFFT_HALF_LENGTH] = nyquist_phase;
-	}
+	result_data[0] = atan2f(0.0f, dc_real) * phase_unit_scale;
+	result_data[RFFT_HALF_LENGTH] = atan2f(0.0f, nyquist_real) * phase_unit_scale;
 }
 
 /**
@@ -229,30 +220,33 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
 	uint32_t i;
 	const float32_t scale = 2.0f / ((float32_t)FFT_LENGTH * hrfft->window_gain);
 	const float32_t phase_unit_scale = unit ? RFFT_RAD_TO_DEG : 1.0f;
-	float32_t mag, phase;
-	float32_t dc_phase, nyquist_phase;
-	float32_t dc_real = result_data[0];
-	float32_t nyquist_real = result_data[1];
+	const float32_t edge_scale = scale * 0.5f;
 
-	arm_atan2_f32(0.0f, dc_real, &dc_phase);
-	arm_atan2_f32(0.0f, nyquist_real, &nyquist_phase);
+	const float32_t dc_real = result_data[0]; // 必须在fabsf之前计算，保证 DC 相位正确，即使 DC 实部为负数；Nyquist 相位同理
+	const float32_t nyquist_real = result_data[1];
+	const float32_t dc_phase = atan2f(0.0f, dc_real);
+	const float32_t nyquist_phase = atan2f(0.0f, nyquist_real);
+
+	const float32_t *src = &result_data[2];
+	float32_t *amp_dst = &result_data[1]; // 优化运行效率
+	float32_t *phase_dst = &hrfft->scratch_buffer[1];
 
 	// 幅值原地、相位暂存到 scratch_buffer
 	for (i = 1U; i < RFFT_HALF_LENGTH; i++)
 	{
-		float32_t real = result_data[2 * i];
-		float32_t imag = result_data[2 * i + 1];
+		const float32_t real = src[0]; // 优化运行效率
+		const float32_t imag = src[1];
 
-		arm_sqrt_f32((real * real) + (imag * imag), &mag);
-		result_data[i] = mag * scale;
+		*amp_dst++ = sqrtf((real * real) + (imag * imag)) * scale;
 
-		arm_atan2_f32(imag, real, &phase);
-		hrfft->scratch_buffer[i] = phase * phase_unit_scale;
+		*phase_dst++ = atan2f(imag, real) * phase_unit_scale;
+
+		src += 2U;
 	}
 
 	// DC / Nyquist 幅值（单边谱 DC 不翻倍，scale*0.5 一次性应用）
-	result_data[0] = fabsf(dc_real) * scale * 0.5f;
-	result_data[RFFT_HALF_LENGTH] = fabsf(nyquist_real) * scale * 0.5f;
+	result_data[0] = fabsf(dc_real) * edge_scale;
+	result_data[RFFT_HALF_LENGTH] = fabsf(nyquist_real) * edge_scale;
 
 	// 写相位区：DC、Nyquist 单独写，其余从 scratch_buffer 整段搬运
 	result_data[RFFT_HALF_LENGTH + 1] = dc_phase * phase_unit_scale;
@@ -300,19 +294,31 @@ static arm_status rfft_copy_input(rfft_handle_t *hrfft, uint32_t adc_data_addr)
  */
 static arm_status rfft_prepare_transform(rfft_handle_t *hrfft, uint32_t adc_data_addr, float32_t *result_data, rfft_window_t window, float32_t offset)
 {
-	arm_status status = rfft_copy_input(hrfft, adc_data_addr);
-
-	if (status != ARM_MATH_SUCCESS)
+	if (hrfft->dma.transfer != NULL)
 	{
-		return status;
-	}
+		arm_status status = rfft_copy_input(hrfft, adc_data_addr);
 
-	convert_unsigned_to_float(hrfft->scratch_buffer, FFT_LENGTH, offset);
+		if (status != ARM_MATH_SUCCESS)
+		{
+			return status;
+		}
+		convert_uint32_to_float(hrfft->scratch_buffer, (const uint32_t *)hrfft->scratch_buffer, FFT_LENGTH, offset);
+	}
+	else
+	{
+		convert_uint32_to_float(hrfft->scratch_buffer, (const uint32_t *)(uintptr_t)adc_data_addr, FFT_LENGTH, offset);
+	}
 
 	if (window != RFFT_WINDOW_RECTANGULAR)
 	{
 		rfft_generate_window(hrfft, window);
 		arm_mult_f32(hrfft->scratch_buffer, hrfft->window_buffer, hrfft->scratch_buffer, FFT_LENGTH);
+	}
+	else
+	{
+		hrfft->cached_window = RFFT_WINDOW_RECTANGULAR;
+		hrfft->window_ready = 1U;
+		hrfft->window_gain = 1.0f;
 	}
 
 	arm_rfft_fast_f32(&hrfft->fft_instance, hrfft->scratch_buffer, result_data, 0);
@@ -519,21 +525,46 @@ void irfft_start(rfft_handle_t *hrfft,
 	}
 
 	const float32_t phase_scale = p_unit ? RFFT_DEG_TO_RAD : 1.0f;
+	float32_t phase;
+	float32_t gain;
 
 	// DC/Nyquist 在 packed 格式下是纯实数，只取补偿相位的 cos 分量
-	rfft_complex[0] *= bode[0] * cosf(PF[0] * phase_scale);
-	rfft_complex[1] *= bode[RFFT_HALF_LENGTH] * cosf(PF[RFFT_HALF_LENGTH] * phase_scale);
+	gain = bode[0];
+	phase = PF[0] * phase_scale;
+	rfft_complex[0] = (gain == 0.0f) ? 0.0f : (rfft_complex[0] * gain * ((phase == 0.0f) ? 1.0f : cosf(phase)));
 
-	for (uint16_t i = 1; i < RFFT_HALF_LENGTH; i++)
+	gain = bode[RFFT_HALF_LENGTH];
+	phase = PF[RFFT_HALF_LENGTH] * phase_scale;
+	rfft_complex[1] = (gain == 0.0f) ? 0.0f : (rfft_complex[1] * gain * ((phase == 0.0f) ? 1.0f : cosf(phase)));
+
+	for (uint32_t i = 1U; i < RFFT_HALF_LENGTH; i++)
 	{
-		float32_t phase = PF[i] * phase_scale;
-		float32_t Hr = bode[i] * cosf(phase);
-		float32_t Hi = bode[i] * sinf(phase);
-		float32_t Xr = rfft_complex[i * 2];
-		float32_t Xi = rfft_complex[i * 2 + 1];
+		float32_t *bin = &rfft_complex[i * 2U];
+		const float32_t Xr = bin[0];
+		const float32_t Xi = bin[1];
 
-		rfft_complex[i * 2] = Xr * Hr - Xi * Hi;
-		rfft_complex[i * 2 + 1] = Xr * Hi + Xi * Hr;
+		gain = bode[i];
+		if (gain == 0.0f)
+		{
+			bin[0] = 0.0f;
+			bin[1] = 0.0f;
+			continue;
+		}
+
+		phase = PF[i] * phase_scale;
+		if (phase == 0.0f)
+		{
+			bin[0] = Xr * gain;
+			bin[1] = Xi * gain;
+		}
+		else
+		{
+			const float32_t Hr = gain * cosf(phase);
+			const float32_t Hi = gain * sinf(phase);
+
+			bin[0] = Xr * Hr - Xi * Hi;
+			bin[1] = Xr * Hi + Xi * Hr;
+		}
 	}
 
 	// arm_rfft_fast_f32 inverse 模式内部 merge_rfft_f32 的访问模式不支持 in-place，
