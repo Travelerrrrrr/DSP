@@ -13,8 +13,8 @@
 #include <string.h>
 
 #define RFFT_DMA_TIMEOUT 0xFFFFU
-#define RFFT_LOG_FLOOR 1.0e-20f
-#define RFFT_LOG_CEILING 1.0e20f
+#define RFFT_LOG_MIN 1.175e-38f
+#define RFFT_LOG_MAX 3.402823e+38f
 #define RFFT_LN_TO_20LOG10 8.68588963806503f
 #define RFFT_RAD_TO_DEG 57.29577951308232f
 #define RFFT_DEG_TO_RAD 0.01745329251994f
@@ -131,13 +131,13 @@ static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
 	{
 		float32_t value = result_data[i] * inv_reference;
 
-		if (value < RFFT_LOG_FLOOR)
+		if (value < RFFT_LOG_MIN)
 		{
-			value = RFFT_LOG_FLOOR;
+			value = RFFT_LOG_MIN;
 		}
-		// else if (value > RFFT_LOG_CEILING)
+		// else if (value > RFFT_LOG_MAX)
 		// {
-		// 	value = RFFT_LOG_CEILING;
+		// 	value = RFFT_LOG_MAX;
 		// }
 
 		result_data[i] = logf(value) * RFFT_LN_TO_20LOG10; // 20log10(x) = ln(x) * 20/ln(10)
@@ -224,12 +224,12 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
 
 	const float32_t dc_real = result_data[0]; // 必须在fabsf之前计算，保证 DC 相位正确，即使 DC 实部为负数；Nyquist 相位同理
 	const float32_t nyquist_real = result_data[1];
-	const float32_t dc_phase = atan2f(0.0f, dc_real);
-	const float32_t nyquist_phase = atan2f(0.0f, nyquist_real);
+	const float32_t dc_phase = dc_real >= 0.0f ? 0.0f : (PI * phase_unit_scale);		   // atan2f(0, x) 在 x<0 时返回 PI，x>=0 时返回 0；这里直接根据实部符号判断，避免调用 atan2f
+	const float32_t nyquist_phase = nyquist_real >= 0.0f ? 0.0f : (PI * phase_unit_scale); // 同上，避免调用 atan2f
 
-	const float32_t *src = &result_data[2];
-	float32_t *amp_dst = &result_data[1]; // 优化运行效率
-	float32_t *phase_dst = &hrfft->scratch_buffer[1];
+	float32_t *src = result_data + 2;
+	float32_t *amp_dst = src; // 优化运行效率
+	float32_t *phase_dst = src + 1;
 
 	// 幅值原地、相位暂存到 scratch_buffer
 	for (i = 1U; i < RFFT_HALF_LENGTH; i++)
@@ -237,23 +237,19 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
 		const float32_t real = src[0]; // 优化运行效率
 		const float32_t imag = src[1];
 
-		*amp_dst++ = sqrtf((real * real) + (imag * imag)) * scale;
-
-		*phase_dst++ = atan2f(imag, real) * phase_unit_scale;
+		*amp_dst = sqrtf((real * real) + (imag * imag)) * scale;
+		*phase_dst = atan2f(imag, real) * phase_unit_scale;
 
 		src += 2U;
+		amp_dst += 2U;
+		phase_dst += 2U;
 	}
 
 	// DC / Nyquist 幅值（单边谱 DC 不翻倍，scale*0.5 一次性应用）
 	result_data[0] = fabsf(dc_real) * edge_scale;
-	result_data[RFFT_HALF_LENGTH] = fabsf(nyquist_real) * edge_scale;
-
-	// 写相位区：DC、Nyquist 单独写，其余从 scratch_buffer 整段搬运
-	result_data[RFFT_HALF_LENGTH + 1] = dc_phase * phase_unit_scale;
-	memcpy(&result_data[RFFT_HALF_LENGTH + 2],
-		   &hrfft->scratch_buffer[1],
-		   (RFFT_HALF_LENGTH - 1U) * sizeof(float32_t));
-	result_data[RFFT_HALF_LENGTH * 2 + 1] = nyquist_phase * phase_unit_scale;
+	result_data[1] = dc_phase;
+	result_data[FFT_LENGTH] = fabsf(nyquist_real) * edge_scale;
+	result_data[FFT_LENGTH + 1] = nyquist_phase;
 }
 
 /**
