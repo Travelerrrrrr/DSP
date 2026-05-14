@@ -2,8 +2,8 @@
  * @file arm_rfft_service.c
  * @brief 基于 CMSIS-DSP 的实数 FFT 服务层实现。
  * @author Analog
- * @version 2.3
- * @date 2026-05-14
+ * @version 2.1
+ * @date 2026-05-13
  * @note 本文件负责完成 ADC 原始数据搬运、数值格式转换、窗函数处理、
  *       RFFT 计算、单边幅频/相频结果提取，以及频域补偿后的逆 RFFT。
  */
@@ -304,7 +304,7 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
 
 	const float32_t dc_real = result_data[0]; // 必须在fabsf之前计算，保证 DC 相位正确，即使 DC 实部为负数；Nyquist 相位同理
 	const float32_t nyquist_real = result_data[1];
-	const float32_t dc_phase = dc_real >= 0.0f ? 0.0f : (PI * phase_unit_scale);		   // atan2f(0, x) 在 x<0 时返回 PI，x>=0 时返回 0；这里直接根据实部符号判断，避免调用 atan2f
+	const float32_t dc_phase = dc_real >= 0.0f ? 0.0f : (PI * phase_unit_scale);		   // 这里直接根据实部符号判断，避免调用 atan2f，确保运行效率
 	const float32_t nyquist_phase = nyquist_real >= 0.0f ? 0.0f : (PI * phase_unit_scale); // 同上，避免调用 atan2f
 
 	float32_t *src = result_data + 2;
