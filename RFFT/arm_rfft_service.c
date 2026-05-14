@@ -30,20 +30,100 @@
  */
 static void convert_uint32_to_float(float32_t *Dst, const uint32_t *Src, uint32_t length, float32_t offset)
 {
-	uint16_t i;
+	uint32_t blkCnt = length >> 2U; // 块计数 4x 展开主循环 后续要做剩余元素的处理
 
 	if (offset != 0.0f)
 	{
-		for (i = 0U; i < length; i++)
+		while (blkCnt > 0U)
 		{
-			Dst[i] = (float32_t)Src[i] + offset;
+			Dst[0] = (float32_t)Src[0] + offset;
+			Dst[1] = (float32_t)Src[1] + offset;
+			Dst[2] = (float32_t)Src[2] + offset;
+			Dst[3] = (float32_t)Src[3] + offset;
+			Dst += 4U;
+			Src += 4U;
+			blkCnt--;
+		}
+
+		blkCnt = length & 0x3U;
+		while (blkCnt > 0U)
+		{
+			*Dst++ = (float32_t)(*Src++) + offset;
+			blkCnt--;
 		}
 	}
 	else
 	{
-		for (i = 0U; i < length; i++)
+		while (blkCnt > 0U)
 		{
-			Dst[i] = (float32_t)Src[i];
+			Dst[0] = (float32_t)Src[0];
+			Dst[1] = (float32_t)Src[1];
+			Dst[2] = (float32_t)Src[2];
+			Dst[3] = (float32_t)Src[3];
+			Dst += 4U;
+			Src += 4U;
+			blkCnt--;
+		}
+
+		blkCnt = length & 0x3U;
+		while (blkCnt > 0U)
+		{
+			*Dst++ = (float32_t)(*Src++);
+			blkCnt--;
+		}
+	}
+}
+
+/**
+ * @brief 将 float32 数据转换为 unsigned 32-bit 整数，可选在转换前叠加偏置。
+ * @param Dst 目标 uint32_t 缓冲区。
+ * @param Src 源 float32_t 数据缓冲区。
+ * @param length 需要转换的数据点数。
+ * @param offset 转换前叠加到每个 float 采样点的偏置值；0.0f 表示不调整。
+ * @note 源数据和目标数据均为 32 bit 宽度，Dst 与 Src 指向同一缓冲区时可安全地正序原地转换。
+ */
+void convert_float_to_uint32(uint32_t *Dst, const float32_t *Src, uint32_t length, float32_t offset)
+{
+	uint32_t blkCnt = length >> 2U; // 块计数 4x 展开主循环 后续要做剩余元素的处理
+
+	if (offset != 0.0f)
+	{
+		while (blkCnt > 0U)
+		{
+			Dst[0] = (uint32_t)(Src[0] + offset);
+			Dst[1] = (uint32_t)(Src[1] + offset);
+			Dst[2] = (uint32_t)(Src[2] + offset);
+			Dst[3] = (uint32_t)(Src[3] + offset);
+			Dst += 4U;
+			Src += 4U;
+			blkCnt--;
+		}
+
+		blkCnt = length & 0x3U;
+		while (blkCnt > 0U)
+		{
+			*Dst++ = (uint32_t)(*Src++ + offset);
+			blkCnt--;
+		}
+	}
+	else
+	{
+		while (blkCnt > 0U)
+		{
+			Dst[0] = (uint32_t)Src[0];
+			Dst[1] = (uint32_t)Src[1];
+			Dst[2] = (uint32_t)Src[2];
+			Dst[3] = (uint32_t)Src[3];
+			Dst += 4U;
+			Src += 4U;
+			blkCnt--;
+		}
+
+		blkCnt = length & 0x3U;
+		while (blkCnt > 0U)
+		{
+			*Dst++ = (uint32_t)(*Src++);
+			blkCnt--;
 		}
 	}
 }
@@ -108,7 +188,7 @@ static void rfft_generate_window(rfft_handle_t *hrfft, rfft_window_t window)
  */
 static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
 {
-	uint16_t i;
+	uint32_t i;
 	float32_t reference = 1.0f;
 	float32_t inv_reference;
 
@@ -158,7 +238,7 @@ static void rfft_convert_unit(float32_t *result_data, rfft_unit_t unit)
  */
 static void rfft_make_single_sided_amplitude(rfft_handle_t *hrfft, float32_t *result_data)
 {
-	uint16_t i;
+	uint32_t i;
 	const float32_t scale = 2.0f / ((float32_t)FFT_LENGTH * hrfft->window_gain);
 	const float32_t edge_scale = scale * 0.5f;
 	const float32_t dc_real = result_data[0];
@@ -191,7 +271,7 @@ static void rfft_make_single_sided_amplitude(rfft_handle_t *hrfft, float32_t *re
 static void rfft_make_single_sided_phase(rfft_handle_t *hrfft, float32_t *result_data, uint8_t unit)
 {
 	(void)hrfft;
-	uint16_t i;
+	uint32_t i;
 	const float32_t dc_real = result_data[0];
 	const float32_t nyquist_real = result_data[1];
 	const float32_t phase_unit_scale = unit ? RFFT_RAD_TO_DEG : 1.0f;
@@ -217,7 +297,7 @@ static void rfft_make_single_sided_phase(rfft_handle_t *hrfft, float32_t *result
  */
 static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32_t *result_data, uint8_t unit)
 {
-	uint16_t i;
+	uint32_t i;
 	const float32_t scale = 2.0f / ((float32_t)FFT_LENGTH * hrfft->window_gain);
 	const float32_t phase_unit_scale = unit ? RFFT_RAD_TO_DEG : 1.0f;
 	const float32_t edge_scale = scale * 0.5f;
@@ -261,7 +341,7 @@ static void rfft_make_single_sided_amplitude_phase(rfft_handle_t *hrfft, float32
  */
 static arm_status rfft_copy_input(rfft_handle_t *hrfft, uint32_t adc_data_addr)
 {
-	uint16_t size = FFT_LENGTH * sizeof(uint32_t);
+	uint32_t size = FFT_LENGTH * sizeof(uint32_t);
 
 	if (hrfft->dma.transfer != NULL)
 	{
@@ -362,8 +442,6 @@ arm_status rfft_handle_init(rfft_handle_t *hrfft, const rfft_dma_t *dma)
 	status = ARM_MATH_ARGUMENT_ERROR;
 #endif
 	return status;
-#else
-	return ARM_MATH_ARGUMENT_ERROR;
 #endif
 }
 
@@ -528,7 +606,7 @@ void irfft_start_compensation(rfft_handle_t *hrfft,
 		RFFT_ERROR_HANDLER();
 		return;
 	}
-
+	uint32_t i;
 	const float32_t phase_scale = p_unit ? RFFT_DEG_TO_RAD : 1.0f;
 	float32_t phase;
 	float32_t gain;
@@ -542,7 +620,7 @@ void irfft_start_compensation(rfft_handle_t *hrfft,
 	phase = PF[RFFT_HALF_LENGTH] * phase_scale;
 	rfft_complex[1] = (gain == 0.0f) ? 0.0f : (rfft_complex[1] * gain * ((phase == 0.0f) ? 1.0f : cosf(phase)));
 
-	for (uint16_t i = 1U; i < RFFT_HALF_LENGTH; i++)
+	for (i = 1U; i < RFFT_HALF_LENGTH; i++)
 	{
 		float32_t *bin = &rfft_complex[i * 2U];
 		const float32_t Xr = bin[0];
@@ -602,23 +680,27 @@ void irfft_start_construction(rfft_handle_t *hrfft,
 	}
 
 	// X[k] = A[k] * cos(P[k]) + j * A[k] * sin(P[k])
+	uint32_t i;
 	float32_t *const Complex_base = hrfft->scratch_buffer;
 	float32_t *Complex_data = Complex_base;
 	const float32_t phase_scale = p_unit ? RFFT_DEG_TO_RAD : 1.0f;
+	// 单边幅频还原至 packed 复数：DC/Nyquist 乘 N，普通频点乘 N/2，抵消前向的 2/N 与边界 1/N 归一化
+	const float32_t edge_scale = (float32_t)FFT_LENGTH;
+	const float32_t bin_scale = (float32_t)RFFT_HALF_LENGTH;
 	const float32_t dc_phase = PF[0] * phase_scale;
 	const float32_t nyquist_phase = PF[RFFT_HALF_LENGTH] * phase_scale;
 	// DC 与 Nyquist 在 CMSIS packed 格式下分别占用 [0]、[1]
-	Complex_data[0] = AF[0] * cosf(dc_phase);
-	Complex_data[1] = AF[RFFT_HALF_LENGTH] * cosf(nyquist_phase);
+	Complex_data[0] = AF[0] * edge_scale * cosf(dc_phase);
+	Complex_data[1] = AF[RFFT_HALF_LENGTH] * edge_scale * cosf(nyquist_phase);
 	Complex_data += 2U;
 
 	const float32_t *PF_ptr = &PF[1];
 	const float32_t *AF_ptr = &AF[1];
 
-	for (uint16_t i = 1U; i < RFFT_HALF_LENGTH; i++)
+	for (i = 1U; i < RFFT_HALF_LENGTH; i++)
 	{
 		const float32_t phase = (*PF_ptr++) * phase_scale;
-		const float32_t amp = *AF_ptr++;
+		const float32_t amp = (*AF_ptr++) * bin_scale;
 		*Complex_data++ = amp * cosf(phase);
 		*Complex_data++ = amp * sinf(phase);
 	}

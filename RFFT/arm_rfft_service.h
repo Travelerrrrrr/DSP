@@ -4,7 +4,9 @@
 #include <stdint.h>
 #include "arm_math.h"
 
-#if USE_ARM_FFT
+#ifndef USE_ARM_FFT
+#define USE_ARM_FFT 1
+#endif
 
 #ifndef FFT_LENGTH
 #define FFT_LENGTH 1024U
@@ -19,7 +21,7 @@
 
 /* 1 Vrms 对应的 ADC 码值，用作 dBV 的 0 dB 参考。 */
 #define RFFT_DBV_REFERENCE_ADC_CODE (1.41421356237309f / ADC_LSB_VOLTAGE)
-#define RFFT_DBFS_REFERENCE_CODE ((ADC_FULL_SCALE_VOLTAGE / 2) / ADC_LSB_VOLTAGE)
+#define RFFT_DBFS_REFERENCE_CODE ((ADC_FULL_SCALE_VOLTAGE / 2.0f) / ADC_LSB_VOLTAGE)
 
 typedef enum
 {
@@ -62,6 +64,17 @@ typedef struct
 	uint8_t window_ready;
 	float32_t window_gain;
 } rfft_handle_t;
+
+#if USE_ARM_FFT
+/**
+ * @brief 将 float32 数据转换为 unsigned 32-bit 整数，可选在转换前叠加偏置。
+ * @param Dst 目标 uint32_t 缓冲区。
+ * @param Src 源 float32_t 数据缓冲区。
+ * @param length 需要转换的数据点数。
+ * @param offset 转换前叠加到每个 float 采样点的偏置值；0.0f 表示不调整。
+ * @note 源数据和目标数据均为 32 bit 宽度，Dst 与 Src 指向同一缓冲区时可安全地正序原地转换。
+ */
+void convert_float_to_uint32(uint32_t *Dst, const float32_t *Src, uint32_t length, float32_t offset);
 
 /**
  * @brief 初始化 RFFT 服务句柄。
@@ -178,4 +191,5 @@ void irfft_start_construction(rfft_handle_t *hrfft,
 void RFFT_ERROR_HANDLER(void);
 
 #endif // USE_ARM_FFT
+
 #endif // __ARM_RFFT_SERVICE_H
