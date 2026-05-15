@@ -1,18 +1,13 @@
 /******************************************************************************
  * @file filter_check.c
  * @author Analog
- * @date 2026/5/11
- * @version 2.0
- * @note 判断滤波器类型，需要根据项目实际情况进行调整Stack大小，以避免Stack Overflow，此函数暂未用到堆，如需
- *       精确的阈值判断，必须使用arm c library，不可使用任何microlib，若不在意速度以及阈值精度，推荐打开
- *       microlib。
+ * @date 2026/5/15
+ * @version 2.2
+ * @note 判断滤波器类型。
  ******************************************************************************/
 
-#include "filter_check.h"
-#include "math.h"
-
-#define FILTER_EXPF_CONVERSION_FACTOR 0.11512925464970f // ln(10) / 20
-#define FILTER_SQRT2 1.41421356237309f
+#include "../User/DSP/filter_check.h"
+#include <stdint.h>
 
 #define assertFILTER_CHECK(x)   \
     do                          \
@@ -23,208 +18,129 @@
         }                       \
     } while (0)
 
-static uint32_t read_u8(void *p) { return *(uint8_t *)p; }
-static uint32_t read_u16(void *p) { return *(uint16_t *)p; }
-static uint32_t read_u32(void *p) { return *(uint32_t *)p; }
-static uint32_t automatic_read(void *p, uint8_t Msize)
-{
-    switch (Msize)
-    {
-    case 8:
-        return read_u8(p);
-    case 16:
-        return read_u16(p);
-    case 32:
-        return read_u32(p);
-    default:
-        return 0;
+// 为了方便维护和避免代码重复，采用宏来定义函数
+#define DEFINE_FILTER_SCAN(NAME, TYPE)                                    \
+    static _filter_info NAME(uint32_t addr, uint16_t Length, float thr)   \
+    {                                                                     \
+        _filter_info info = {0, 0, FILTER_NULL};                          \
+        const TYPE *p = (const TYPE *)(uintptr_t)addr;                    \
+        uint16_t k;                                                       \
+                                                                          \
+        /* 1) 全通检测：遇到首个低于阈值的点立即退出 */                   \
+        for (k = 0; k < Length; k++)                                      \
+        {                                                                 \
+            if ((float)p[k] < thr)                                        \
+                break;                                                    \
+        }                                                                 \
+        if (k == Length)                                                  \
+        {                                                                 \
+            info.type = FILTER_FULLPASS;                                  \
+            return info;                                                  \
+        }                                                                 \
+                                                                          \
+        /* 2) 滑窗扫描 rise/fall，仅当 Length >= 3 才有意义 */            \
+        if (Length >= 3)                                                  \
+        {                                                                 \
+            uint16_t first_rise = 0, first_fall = 0, fall_after_rise = 0; \
+            uint8_t has_rise = 0, has_fall = 0, has_far = 0;              \
+            uint8_t bin_bef = ((float)p[0] < thr);                        \
+            uint8_t bin_curr = ((float)p[1] < thr);                       \
+            uint16_t last = (uint16_t)(Length - 1);                       \
+                                                                          \
+            for (k = 1; k < last; k++)                                    \
+            {                                                             \
+                uint8_t bin_aft = ((float)p[k + 1] < thr);                \
+                if (bin_bef && !bin_aft)                                  \
+                {                                                         \
+                    if (!has_rise)                                        \
+                    {                                                     \
+                        first_rise = k;                                   \
+                        has_rise = 1;                                     \
+                    }                                                     \
+                }                                                         \
+                else if (!bin_bef && bin_aft)                             \
+                {                                                         \
+                    if (!has_fall)                                        \
+                    {                                                     \
+                        first_fall = k;                                   \
+                        has_fall = 1;                                     \
+                    }                                                     \
+                    if (has_rise && k >= (uint16_t)(first_rise + 2))      \
+                    {                                                     \
+                        fall_after_rise = k;                              \
+                        has_far = 1;                                      \
+                        break;                                            \
+                    }                                                     \
+                }                                                         \
+                bin_bef = bin_curr;                                       \
+                bin_curr = bin_aft;                                       \
+            }                                                             \
+                                                                          \
+            /* 3) 类型判定 */                                             \
+            if (has_far)                                                  \
+            {                                                             \
+                info.pRais = first_rise;                                  \
+                info.pFall = fall_after_rise;                             \
+                info.type = FILTER_BANDPASS;                              \
+            }                                                             \
+            else if (has_rise && has_fall)                                \
+            {                                                             \
+                info.pRais = first_rise;                                  \
+                info.pFall = first_fall;                                  \
+                info.type = FILTER_BANDSTOP;                              \
+            }                                                             \
+            else if (has_rise)                                            \
+            {                                                             \
+                info.pRais = first_rise;                                  \
+                info.type = FILTER_HIGHPASS;                              \
+            }                                                             \
+            else if (has_fall)                                            \
+            {                                                             \
+                info.pFall = first_fall;                                  \
+                info.type = FILTER_LOWPASS;                               \
+            }                                                             \
+        }                                                                 \
+        return info;                                                      \
     }
-}
+
+DEFINE_FILTER_SCAN(filter_scan_u8, uint8_t)
+DEFINE_FILTER_SCAN(filter_scan_u16, uint16_t)
+DEFINE_FILTER_SCAN(filter_scan_u32, uint32_t)
 #ifdef FILTER_CHECK_FLOAT
-static float read_f32(void *p) { return *(float *)p; }
+DEFINE_FILTER_SCAN(filter_scan_f32, float)
 #endif
+
 /**
  * @brief 判断滤波器类型
  * @param addr 数据地址
  * @param Msize 数据位宽，必须是8的倍数, 0表示为float类型
  * @param Length 数据长度，必须大于0
- * @param threshold dBV阈值
- * @param BitWidth 位宽，默认为12
- * @param ADC_Ref ADC参考电压，默认为3.3V
- * @return FILTER_INFO 滤波器信息结构体
+ * @param threshold 阈值
+ * @return _filter_info 滤波器信息结构体
  */
-FILTER_INFO filter_check(uint32_t addr, uint8_t Msize, uint16_t Length, FILTER_UNIT unit, float threshold, uint8_t BitWidth, float ADC_Ref)
+_filter_info filter_check(uint32_t addr, uint8_t Msize, uint16_t Length, float threshold)
 {
 #ifdef USE_FILTER_CHECK
-    FILTER_INFO filter_info = {0, 0, FILTER_NULL};
+    _filter_info filter_info = {0, 0, FILTER_NULL};
 
     assertFILTER_CHECK(addr != 0);
     assertFILTER_CHECK((Msize % 8) == 0);
     assertFILTER_CHECK(Length > 0);
 
-    if (BitWidth == 0)
-        BitWidth = 12;
-
-    if (ADC_Ref == 0)
-        ADC_Ref = 3.3f;
-
-    float vFFTDATAThreshold;
-
-    switch (unit)
+    switch (Msize)
     {
-    case RFFT_UNIT_RAW:
-        vFFTDATAThreshold = threashold;
-        break;
-    case RFFT_UNIT_DBV:
-        vFFTDATAThreshold = expf(threshold * FILTER_EXPF_CONVERSION_FACTOR) * FILTER_SQRT2 / (ADC_Ref / ((1 << BitWidth) - 1));
-        break;
-    case RFFT_UNIT_DBFS:
-        vFFTDATAThreshold = expf(threshold * FILTER_EXPF_CONVERSION_FACTOR) * ((1 << BitWidth) - 1); // dBFS = 20 * log10(x / ((1<<BitWidth) - 1))
-        break;
-    default:
-        vFFTDATAThreshold = threashold;
-        break;
-    }
-
-    uint8_t _addr_Inc = Msize / 8, find = 0;
-
-    uint16_t i, j;
-
-    uint16_t fullpass = 1;
-
-    if (_addr_Inc != 0)
-    {
-        for (i = 0; i < Length; i++)
-        {
-            if (automatic_read(addr + i * _addr_Inc, Msize) < vFFTDATAThreshold)
-            {
-                fullpass = 0;
-                break;
-            }
-        }
-
-        if (fullpass)
-        {
-            find = 1;
-            filter_info.pRais = 0;
-            filter_info.pFall = 0;
-            filter_info.type = FILTER_FULLPASS;
-            return filter_info;
-        }
-
-        for (i = 1; i < Length - 1; i++)
-        {
-            if (automatic_read(addr + i * _addr_Inc - _addr_Inc, Msize) < vFFTDATAThreshold && automatic_read(addr + i * _addr_Inc + _addr_Inc, Msize) >= vFFTDATAThreshold)
-            {
-                filter_info.pRais = i;
-                for (j = i + 2; j < Length - 1; j++)
-                {
-                    if (automatic_read(addr + j * _addr_Inc - _addr_Inc, Msize) >= vFFTDATAThreshold && automatic_read(addr + j * _addr_Inc + _addr_Inc, Msize) < vFFTDATAThreshold)
-                    {
-                        filter_info.pFall = j;
-                        find = 1;
-                        filter_info.type = FILTER_BANDPASS;
-                        break;
-                    }
-                }
-                if (!find)
-                {
-                    for (i = 1; i < Length - 1; i++)
-                    {
-                        if (automatic_read(addr + i * _addr_Inc - _addr_Inc, Msize) >= vFFTDATAThreshold && automatic_read(addr + i * _addr_Inc + _addr_Inc, Msize) < vFFTDATAThreshold)
-                        {
-                            filter_info.pFall = i;
-                            find = 1;
-                            filter_info.type = FILTER_BANDSTOP;
-                            break;
-                        }
-                    }
-                    if (!find)
-                    {
-                        find = 1;
-                        filter_info.type = FILTER_HIGHPASS;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (filter_info.type == FILTER_NULL)
-        {
-            for (i = 1; i < Length - 1; i++)
-            {
-                if (automatic_read(addr + i * _addr_Inc - _addr_Inc, Msize) >= vFFTDATAThreshold && automatic_read(addr + i * _addr_Inc + _addr_Inc, Msize) < vFFTDATAThreshold)
-                {
-                    filter_info.pFall = i;
-                    find = 1;
-                    filter_info.type = FILTER_LOWPASS;
-                    break;
-                }
-            }
-        }
-    }
-    else
-    {
+    case 8:
+        return filter_scan_u8(addr, Length, threshold);
+    case 16:
+        return filter_scan_u16(addr, Length, threshold);
+    case 32:
+        return filter_scan_u32(addr, Length, threshold);
 #ifdef FILTER_CHECK_FLOAT
-        for (i = 0; i < Length; i++)
-        {
-            if (read_f32(addr + i * 4) < vFFTDATAThreshold)
-            {
-                fullpass = 0;
-                break;
-            }
-        }
-
-        if (fullpass)
-        {
-            find = 1;
-            filter_info.pRais = 0;
-            filter_info.pFall = 0;
-            filter_info.type = FILTER_FULLPASS;
-            return filter_info;
-        }
-
-        for (i = 1; i < Length - 1; i++)
-        {
-            if (read_f32(addr + i * 4 - 4) < vFFTDATAThreshold && read_f32(addr + i * 4 + 4) >= vFFTDATAThreshold)
-            {
-                filter_info.pRais = i;
-                for (j = i + 2; j < Length - 1; j++)
-                {
-                    if (read_f32(addr + j * 4 - 4) >= vFFTDATAThreshold && read_f32(addr + j * 4 + 4) < vFFTDATAThreshold)
-                    {
-                        filter_info.pFall = j;
-                        find = 1;
-                        filter_info.type = FILTER_BANDPASS;
-                        break;
-                    }
-                }
-                if (!find)
-                {
-                    for (i = 1; i < Length - 1; i++)
-                    {
-                        if (read_f32(addr + i * 4 - 4) >= vFFTDATAThreshold && read_f32(addr + i * 4 + 4) < vFFTDATAThreshold)
-                        {
-                            filter_info.pFall = i;
-                            find = 1;
-                            filter_info.type = FILTER_BANDSTOP;
-                            break;
-                        }
-                    }
-                    if (!find)
-                    {
-                        find = 1;
-                        filter_info.type = FILTER_HIGHPASS;
-                        break;
-                    }
-                }
-            }
-        }
-#else
-        filter_info.type = FILTER_NULL;
+    case 0:
+        return filter_scan_f32(addr, Length, threshold);
 #endif
+    default:
+        return filter_info;
     }
-
-    return filter_info;
 #endif
 }
