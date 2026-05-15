@@ -1,8 +1,8 @@
 #ifndef __ARM_RFFT_SERVICE_H
 #define __ARM_RFFT_SERVICE_H
 
+#include "../User/DSP/dsp_config.h"
 #include <stdint.h>
-#include "arm_math.h"
 
 #ifndef USE_ARM_FFT
 #define USE_ARM_FFT 1
@@ -12,10 +12,17 @@
 #define FFT_LENGTH 1024U
 #endif
 
+#ifndef ADC_RESOLUTION_BITS
+#define ADC_RESOLUTION_BITS 12U
+#endif
+
+#ifndef ADC_FULL_SCALE_VOLTAGE
+#define ADC_FULL_SCALE_VOLTAGE 3.3f
+#endif
+
 #define RFFT_HALF_LENGTH (FFT_LENGTH / 2U)
 #define FFT_RESULT_LENGTH (FFT_LENGTH + 2U)
-#define ADC_RESOLUTION_BITS 12U
-#define ADC_FULL_SCALE_VOLTAGE 3.3f
+
 #define ADC_FULL_SCALE_CODE ((1UL << ADC_RESOLUTION_BITS) - 1UL)
 #define ADC_LSB_VOLTAGE (ADC_FULL_SCALE_VOLTAGE / (float32_t)ADC_FULL_SCALE_CODE)
 
@@ -66,6 +73,7 @@ typedef struct
 } rfft_handle_t;
 
 #if USE_ARM_FFT
+
 /**
  * @brief 将 float32 数据转换为 unsigned 32-bit 整数，可选在转换前叠加偏置。
  * @param Dst 目标 uint32_t 缓冲区。
